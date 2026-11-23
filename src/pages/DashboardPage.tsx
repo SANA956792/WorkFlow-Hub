@@ -20,12 +20,14 @@ import {
   ReelStatus,
   TaskStatus,
 } from '../types';
+import { PageLoadError } from '../components/PageLoadError';
 import { formatDisplayDate, formatDisplayDateTime, formatTime12h } from '../utils/dates';
 import { getAvatarColor, getInitials, getStatusBadgeStyle } from '../utils/colors';
 
 interface DashboardPageProps {
   summary: DashboardSummary | null;
   loading: boolean;
+  loaded: boolean;
   error: string | null;
   settings: CompanySettings | null;
   onRetry: () => void;
@@ -47,12 +49,13 @@ interface DashboardPageProps {
 export function DashboardPage({
   summary,
   loading,
+  loaded,
   error,
   settings,
   onRetry,
   onNavigate,
 }: DashboardPageProps) {
-  if (loading && !summary) {
+  if (loading && !loaded && !summary) {
     return (
       <div className="space-y-6">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
@@ -73,20 +76,13 @@ export function DashboardPage({
 
   if (error && !summary) {
     return (
-      <div className="rounded-2xl border border-rose-200 bg-white p-8 text-center">
-        <AlertCircle className="mx-auto h-10 w-10 text-[#E85D65]" />
-        <h3 className="mt-3 text-base font-bold text-slate-900">
-          Unable to load dashboard
-        </h3>
-        <p className="mt-1 text-sm text-slate-600">{error}</p>
-        <button
-          type="button"
-          onClick={onRetry}
-          className="mt-4 rounded-xl bg-[#4776E6] px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
-        >
-          Retry
-        </button>
-      </div>
+      <PageLoadError
+        title="Unable to load dashboard"
+        message={error}
+        retrying={loading}
+        onRetry={onRetry}
+        variant="card"
+      />
     );
   }
 
@@ -171,6 +167,15 @@ export function DashboardPage({
 
   return (
     <div className="space-y-6">
+      {error && summary && (
+        <PageLoadError
+          title="Could not refresh dashboard"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="banner"
+        />
+      )}
       {/* Brand Welcome Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-white px-6 py-4 shadow-xs">
         <div className="flex items-center gap-4">

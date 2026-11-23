@@ -25,7 +25,7 @@ export interface TaskUpdateInput {
 }
 
 export const taskService = {
-  list: () => apiRequest<TaskRecord[]>('/api/tasks'),
+  list: (signal?: AbortSignal) => apiRequest<TaskRecord[]>('/api/tasks', { signal }),
   getDetail: (id: string) => apiRequest<TaskRecord>(`/api/tasks/${id}`),
   create: (input: TaskInput) =>
     apiRequest<TaskRecord>('/api/tasks', {

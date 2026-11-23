@@ -19,6 +19,7 @@ import { PosterInput, posterService } from '../services/posterService';
 import { uploadFileToStorage } from '../services/storageService';
 import { ThreeDotMenu } from '../components/ThreeDotMenu';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { PageLoadError } from '../components/PageLoadError';
 import { formatDisplayDate, formatTime12h } from '../utils/dates';
 import { getStatusBadgeStyle } from '../utils/colors';
 import { safeExternalUrl } from '../utils/urls';
@@ -60,6 +61,9 @@ interface PostersPageProps {
   posters: PosterRecord[];
   employees: Employee[];
   loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  onRetry: () => void;
   initialStatusFilter?: PosterStatus | 'All';
   initialSelectedPosterId?: string | null;
   onClearInitialSelection?: () => void;
@@ -71,6 +75,9 @@ export function PostersPage({
   posters,
   employees,
   loading,
+  loaded,
+  error,
+  onRetry,
   initialStatusFilter,
   initialSelectedPosterId,
   onClearInitialSelection,
@@ -440,14 +447,32 @@ export function PostersPage({
         </div>
       </div>
 
+      {error && loaded && (
+        <PageLoadError
+          title="Could not refresh posters"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="banner"
+        />
+      )}
+
       {/* Poster Cards Grid */}
-      {loading && posters.length === 0 ? (
+      {loading && !loaded && posters.length === 0 ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="h-72 animate-pulse rounded-2xl bg-slate-200" />
           ))}
         </div>
-      ) : filteredPosters.length === 0 ? (
+      ) : error && !loaded && posters.length === 0 ? (
+        <PageLoadError
+          title="Unable to load posters"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="card"
+        />
+      ) : loaded && filteredPosters.length === 0 ? (
         <div className="rounded-2xl border border-slate-200/80 bg-white p-12 text-center">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-[#E85B9A]/10 text-[#E85B9A]">
             <ImageIcon className="h-6 w-6" />

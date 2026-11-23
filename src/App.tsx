@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -23,6 +23,7 @@ import {
   TaskRecord,
   TaskStatus,
 } from './types';
+import { ApiError } from './services/apiClient';
 import { settingsService } from './services/settingsService';
 import { storageServiceUploadLogo } from './services/logoHelper';
 import { dashboardService } from './services/dashboardService';
@@ -63,7 +64,27 @@ export default function App() {
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
 
   const [dataLoading, setDataLoading] = useState(false);
-  const [dataError, setDataError] = useState<string | null>(null);
+  const [retryingSection, setRetryingSection] = useState<NavSection | null>(null);
+  const [loadedSections, setLoadedSections] = useState<Record<NavSection, boolean>>({
+    dashboard: false,
+    employees: false,
+    tasks: false,
+    posters: false,
+    reels: false,
+    calendar: false,
+  });
+  const [pageErrors, setPageErrors] = useState<Record<NavSection, string | null>>({
+    dashboard: null,
+    employees: null,
+    tasks: null,
+    posters: null,
+    reels: null,
+    calendar: null,
+  });
+
+  const refreshRequestIdRef = useRef(0);
+  const refreshAbortRef = useRef<AbortController | null>(null);
+  const inFlightRefreshRef = useRef<Promise<void> | null>(null);
 
   // Company Access Code login form state
   const [accessCodeInput, setAccessCodeInput] = useState('');
@@ -132,45 +153,255 @@ export default function App() {
     loadSettings();
   }, [loadSettings]);
 
-  const refreshAllData = useCallback(async () => {
-    if (!authenticated) return;
-    setDataLoading(true);
-    setDataError(null);
-    try {
-      const [sum, emps, tks, psts, rls, cal] = await Promise.all([
-        dashboardService.getSummary(),
-        employeeService.list(),
-        taskService.list(),
-        posterService.list(),
-        reelService.list(),
-        dashboardService.getCalendarEvents(),
-      ]);
-      setDashboard(sum);
-      setEmployees(emps);
-      setTasks(tks);
-      setPosters(psts);
-      setReels(rls);
-      setCalendarEvents(cal);
-    } catch (err: any) {
-      const msg = err.message || 'Failed to load workspace data.';
-      setDataError(msg);
-      notify('error', msg);
-    } finally {
-      setDataLoading(false);
-    }
-  }, [authenticated, notify]);
+  const refreshAllData = useCallback(
+    async (force = true) => {
+      if (!authenticated) return;
+      if (!force && inFlightRefreshRef.current) {
+        return inFlightRefreshRef.current;
+      }
+
+      refreshAbortRef.current?.abort();
+      const controller = new AbortController();
+      refreshAbortRef.current = controller;
+      const requestId = ++refreshRequestIdRef.current;
+
+      setDataLoading(true);
+      setPageErrors({
+        dashboard: null,
+        employees: null,
+        tasks: null,
+        posters: null,
+        reels: null,
+        calendar: null,
+      });
+
+      const run = (async () => {
+        try {
+          const workspace = await dashboardService.getWorkspace(controller.signal);
+          if (requestId !== refreshRequestIdRef.current) return;
+
+          setDashboard(workspace.summary);
+          setEmployees(workspace.employees);
+          setTasks(workspace.tasks);
+          setPosters(workspace.posters);
+          setReels(workspace.reels);
+          setCalendarEvents(workspace.calendarEvents);
+          setLoadedSections({
+            dashboard: true,
+            employees: true,
+            tasks: true,
+            posters: true,
+            reels: true,
+            calendar: true,
+          });
+          setPageErrors({
+            dashboard: null,
+            employees: null,
+            tasks: null,
+            posters: null,
+            reels: null,
+            calendar: null,
+          });
+        } catch (err: any) {
+          if (err?.name === 'AbortError' || requestId !== refreshRequestIdRef.current) {
+            return;
+          }
+          if (err instanceof ApiError && err.status === 401) {
+            return;
+          }
+
+          // Fallback to independent settled requests so one failing route never blocks other pages
+          const results = await Promise.allSettled([
+            dashboardService.getSummary(controller.signal),
+            employeeService.list(controller.signal),
+            taskService.list(controller.signal),
+            posterService.list(controller.signal),
+            reelService.list(controller.signal),
+            dashboardService.getCalendarEvents(controller.signal),
+          ]);
+
+          if (requestId !== refreshRequestIdRef.current) return;
+
+          const [dashRes, empRes, taskRes, posterRes, reelRes, calRes] = results;
+          const nextLoaded: Partial<Record<NavSection, boolean>> = {};
+          const nextErrors: Partial<Record<NavSection, string | null>> = {};
+          let firstErrMsg: string | null = null;
+
+          if (dashRes.status === 'fulfilled') {
+            setDashboard(dashRes.value);
+            nextLoaded.dashboard = true;
+            nextErrors.dashboard = null;
+          } else if (dashRes.reason?.name !== 'AbortError') {
+            const msg = dashRes.reason?.message || 'Unable to load dashboard.';
+            nextErrors.dashboard = msg;
+            firstErrMsg = firstErrMsg || msg;
+          }
+
+          if (empRes.status === 'fulfilled') {
+            setEmployees(empRes.value);
+            nextLoaded.employees = true;
+            nextErrors.employees = null;
+          } else if (empRes.reason?.name !== 'AbortError') {
+            const msg = empRes.reason?.message || 'Unable to load employees.';
+            nextErrors.employees = msg;
+            firstErrMsg = firstErrMsg || msg;
+          }
+
+          if (taskRes.status === 'fulfilled') {
+            setTasks(taskRes.value);
+            nextLoaded.tasks = true;
+            nextErrors.tasks = null;
+          } else if (taskRes.reason?.name !== 'AbortError') {
+            const msg = taskRes.reason?.message || 'Unable to load tasks.';
+            nextErrors.tasks = msg;
+            firstErrMsg = firstErrMsg || msg;
+          }
+
+          if (posterRes.status === 'fulfilled') {
+            setPosters(posterRes.value);
+            nextLoaded.posters = true;
+            nextErrors.posters = null;
+          } else if (posterRes.reason?.name !== 'AbortError') {
+            const msg = posterRes.reason?.message || 'Unable to load posters.';
+            nextErrors.posters = msg;
+            firstErrMsg = firstErrMsg || msg;
+          }
+
+          if (reelRes.status === 'fulfilled') {
+            setReels(reelRes.value);
+            nextLoaded.reels = true;
+            nextErrors.reels = null;
+          } else if (reelRes.reason?.name !== 'AbortError') {
+            const msg = reelRes.reason?.message || 'Unable to load reels.';
+            nextErrors.reels = msg;
+            firstErrMsg = firstErrMsg || msg;
+          }
+
+          if (calRes.status === 'fulfilled') {
+            setCalendarEvents(calRes.value);
+            nextLoaded.calendar = true;
+            nextErrors.calendar = null;
+          } else if (calRes.reason?.name !== 'AbortError') {
+            const msg = calRes.reason?.message || 'Unable to load calendar.';
+            nextErrors.calendar = msg;
+            firstErrMsg = firstErrMsg || msg;
+          }
+
+          setLoadedSections((prev) => ({ ...prev, ...nextLoaded }));
+          setPageErrors((prev) => ({ ...prev, ...nextErrors }));
+
+          if (firstErrMsg) {
+            notify('error', firstErrMsg);
+          }
+        } finally {
+          if (requestId === refreshRequestIdRef.current) {
+            setDataLoading(false);
+            inFlightRefreshRef.current = null;
+          }
+        }
+      })();
+
+      inFlightRefreshRef.current = run;
+      return run;
+    },
+    [authenticated, notify]
+  );
+
+  const retrySection = useCallback(
+    async (section: NavSection) => {
+      if (!authenticated || retryingSection === section) return;
+      setRetryingSection(section);
+      setPageErrors((prev) => ({ ...prev, [section]: null }));
+      try {
+        if (section === 'dashboard') {
+          const sum = await dashboardService.getSummary();
+          setDashboard(sum);
+        } else if (section === 'employees') {
+          const emps = await employeeService.list();
+          setEmployees(emps);
+        } else if (section === 'tasks') {
+          const [tksRes, empsRes] = await Promise.allSettled([
+            taskService.list(),
+            loadedSections.employees ? Promise.resolve(null) : employeeService.list(),
+          ]);
+          if (empsRes.status === 'fulfilled' && empsRes.value) {
+            setEmployees(empsRes.value);
+            setLoadedSections((prev) => ({ ...prev, employees: true }));
+          }
+          if (tksRes.status === 'rejected') throw tksRes.reason;
+          setTasks(tksRes.value);
+        } else if (section === 'posters') {
+          const [pstsRes, empsRes] = await Promise.allSettled([
+            posterService.list(),
+            loadedSections.employees ? Promise.resolve(null) : employeeService.list(),
+          ]);
+          if (empsRes.status === 'fulfilled' && empsRes.value) {
+            setEmployees(empsRes.value);
+            setLoadedSections((prev) => ({ ...prev, employees: true }));
+          }
+          if (pstsRes.status === 'rejected') throw pstsRes.reason;
+          setPosters(pstsRes.value);
+        } else if (section === 'reels') {
+          const [rlsRes, empsRes] = await Promise.allSettled([
+            reelService.list(),
+            loadedSections.employees ? Promise.resolve(null) : employeeService.list(),
+          ]);
+          if (empsRes.status === 'fulfilled' && empsRes.value) {
+            setEmployees(empsRes.value);
+            setLoadedSections((prev) => ({ ...prev, employees: true }));
+          }
+          if (rlsRes.status === 'rejected') throw rlsRes.reason;
+          setReels(rlsRes.value);
+        } else if (section === 'calendar') {
+          const cal = await dashboardService.getCalendarEvents();
+          setCalendarEvents(cal);
+        }
+        setLoadedSections((prev) => ({ ...prev, [section]: true }));
+        setPageErrors((prev) => ({ ...prev, [section]: null }));
+      } catch (err: any) {
+        if (err instanceof ApiError && err.status === 401) return;
+        const msg = err?.message || `Unable to load ${section}.`;
+        setPageErrors((prev) => ({ ...prev, [section]: msg }));
+        notify('error', msg);
+      } finally {
+        setRetryingSection((curr) => (curr === section ? null : curr));
+      }
+    },
+    [authenticated, loadedSections.employees, notify, retryingSection]
+  );
 
   useEffect(() => {
     if (authenticated) {
-      refreshAllData();
+      refreshAllData(true);
     } else {
+      refreshAbortRef.current?.abort();
+      inFlightRefreshRef.current = null;
       setDashboard(null);
       setEmployees([]);
       setTasks([]);
       setPosters([]);
       setReels([]);
       setCalendarEvents([]);
+      setLoadedSections({
+        dashboard: false,
+        employees: false,
+        tasks: false,
+        posters: false,
+        reels: false,
+        calendar: false,
+      });
+      setPageErrors({
+        dashboard: null,
+        employees: null,
+        tasks: null,
+        posters: null,
+        reels: null,
+        calendar: null,
+      });
     }
+    return () => {
+      refreshAbortRef.current?.abort();
+    };
   }, [authenticated, refreshAllData]);
 
   const handleUploadLogo = async (file: File) => {
@@ -178,7 +409,7 @@ export default function App() {
       const updated = await storageServiceUploadLogo(file);
       setSettings(updated);
       notify('success', 'Company logo saved permanently.');
-      await refreshAllData();
+      await refreshAllData(true);
     } catch (err: any) {
       notify('error', err.message || 'Unable to upload company logo.');
     }
@@ -310,6 +541,9 @@ export default function App() {
                   type={showCode ? 'text' : 'password'}
                   autoFocus
                   autoComplete="current-password"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={accessCodeInput}
                   onChange={(e) => {
                     setAccessCodeInput(e.target.value);
@@ -350,6 +584,9 @@ export default function App() {
                   id="confirm-access-code"
                   type={showCode ? 'text' : 'password'}
                   autoComplete="new-password"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={confirmCodeInput}
                   onChange={(e) => {
                     setConfirmCodeInput(e.target.value);
@@ -433,7 +670,7 @@ export default function App() {
 
           <button
             type="button"
-            onClick={refreshAllData}
+            onClick={() => refreshAllData(false)}
             disabled={dataLoading}
             className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
           >
@@ -449,10 +686,11 @@ export default function App() {
           {activeSection === 'dashboard' && (
             <DashboardPage
               summary={dashboard}
-              loading={dataLoading}
-              error={dataError}
+              loading={dataLoading || retryingSection === 'dashboard'}
+              loaded={loadedSections.dashboard}
+              error={pageErrors.dashboard}
               settings={settings}
-              onRetry={refreshAllData}
+              onRetry={() => retrySection('dashboard')}
               onNavigate={handleNavigate}
             />
           )}
@@ -460,10 +698,13 @@ export default function App() {
           {activeSection === 'employees' && (
             <EmployeesPage
               employees={employees}
-              loading={dataLoading}
+              loading={dataLoading || retryingSection === 'employees'}
+              loaded={loadedSections.employees}
+              error={pageErrors.employees}
+              onRetry={() => retrySection('employees')}
               initialSelectedEmployeeId={selectedEmployeeId}
               onClearInitialSelection={() => setSelectedEmployeeId(null)}
-              onRefresh={refreshAllData}
+              onRefresh={() => refreshAllData(true)}
               onNotify={notify}
             />
           )}
@@ -472,12 +713,15 @@ export default function App() {
             <TasksPage
               tasks={tasks}
               employees={employees}
-              loading={dataLoading}
+              loading={dataLoading || retryingSection === 'tasks'}
+              loaded={loadedSections.tasks}
+              error={pageErrors.tasks}
+              onRetry={() => retrySection('tasks')}
               initialStatusFilter={taskStatusFilter}
               initialDeadlineFilter={taskDeadlineFilter}
               initialSelectedTaskId={selectedTaskId}
               onClearInitialSelection={() => setSelectedTaskId(null)}
-              onRefresh={refreshAllData}
+              onRefresh={() => refreshAllData(true)}
               onNotify={notify}
             />
           )}
@@ -486,11 +730,14 @@ export default function App() {
             <PostersPage
               posters={posters}
               employees={employees}
-              loading={dataLoading}
+              loading={dataLoading || retryingSection === 'posters'}
+              loaded={loadedSections.posters}
+              error={pageErrors.posters}
+              onRetry={() => retrySection('posters')}
               initialStatusFilter={posterStatusFilter}
               initialSelectedPosterId={selectedPosterId}
               onClearInitialSelection={() => setSelectedPosterId(null)}
-              onRefresh={refreshAllData}
+              onRefresh={() => refreshAllData(true)}
               onNotify={notify}
             />
           )}
@@ -499,11 +746,14 @@ export default function App() {
             <ReelsPage
               reels={reels}
               employees={employees}
-              loading={dataLoading}
+              loading={dataLoading || retryingSection === 'reels'}
+              loaded={loadedSections.reels}
+              error={pageErrors.reels}
+              onRetry={() => retrySection('reels')}
               initialStatusFilter={reelStatusFilter}
               initialSelectedReelId={selectedReelId}
               onClearInitialSelection={() => setSelectedReelId(null)}
-              onRefresh={refreshAllData}
+              onRefresh={() => refreshAllData(true)}
               onNotify={notify}
             />
           )}
@@ -511,7 +761,10 @@ export default function App() {
           {activeSection === 'calendar' && (
             <CalendarPage
               events={calendarEvents}
-              loading={dataLoading}
+              loading={dataLoading || retryingSection === 'calendar'}
+              loaded={loadedSections.calendar}
+              error={pageErrors.calendar}
+              onRetry={() => retrySection('calendar')}
               onOpenEvent={(sec, opts) => handleNavigate(sec, opts)}
             />
           )}

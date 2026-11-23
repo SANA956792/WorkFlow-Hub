@@ -20,6 +20,7 @@ import { employeeService, EmployeeInput } from '../services/employeeService';
 import { uploadFileToStorage } from '../services/storageService';
 import { ThreeDotMenu } from '../components/ThreeDotMenu';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { PageLoadError } from '../components/PageLoadError';
 import { formatDisplayDate, formatDisplayDateTime } from '../utils/dates';
 import {
   getAvatarColor,
@@ -30,6 +31,9 @@ import {
 interface EmployeesPageProps {
   employees: Employee[];
   loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  onRetry: () => void;
   initialSelectedEmployeeId?: string | null;
   onClearInitialSelection?: () => void;
   onRefresh: () => Promise<void>;
@@ -39,6 +43,9 @@ interface EmployeesPageProps {
 export function EmployeesPage({
   employees,
   loading,
+  loaded,
+  error,
+  onRetry,
   initialSelectedEmployeeId,
   onClearInitialSelection,
   onRefresh,
@@ -67,9 +74,11 @@ export function EmployeesPage({
 
   // Detail profile modal state
   const [detailOpen, setDetailOpen] = useState(false);
+  const [detailTargetId, setDetailTargetId] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [employeeDetail, setEmployeeDetail] = useState<EmployeeDetail | null>(null);
+  const detailReqIdRef = useRef(0);
 
   // Confirm delete/deactivate modal
   const [confirmTarget, setConfirmTarget] = useState<{
@@ -103,17 +112,23 @@ export function EmployeesPage({
   }, [employees, search, departmentFilter, statusFilter]);
 
   const openProfile = async (empId: string) => {
+    const reqId = ++detailReqIdRef.current;
+    setDetailTargetId(empId);
     setDetailOpen(true);
     setDetailLoading(true);
     setDetailError(null);
     setEmployeeDetail(null);
     try {
       const detail = await employeeService.getDetail(empId);
+      if (reqId !== detailReqIdRef.current) return;
       setEmployeeDetail(detail);
     } catch (err: any) {
+      if (reqId !== detailReqIdRef.current) return;
       setDetailError(err.message || 'Unable to load employee profile.');
     } finally {
-      setDetailLoading(false);
+      if (reqId === detailReqIdRef.current) {
+        setDetailLoading(false);
+      }
     }
   };
 
@@ -312,14 +327,32 @@ export function EmployeesPage({
         </div>
       </div>
 
+      {error && loaded && (
+        <PageLoadError
+          title="Could not refresh employees"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="banner"
+        />
+      )}
+
       {/* Employee Cards Grid */}
-      {loading && employees.length === 0 ? (
+      {loading && !loaded && employees.length === 0 ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, idx) => (
             <div key={idx} className="h-44 animate-pulse rounded-2xl bg-slate-200" />
           ))}
         </div>
-      ) : filteredEmployees.length === 0 ? (
+      ) : error && !loaded && employees.length === 0 ? (
+        <PageLoadError
+          title="Unable to load employees"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="card"
+        />
+      ) : loaded && filteredEmployees.length === 0 ? (
         <div className="rounded-2xl border border-slate-200/80 bg-white p-12 text-center">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-[#4776E6]/10 text-[#4776E6]">
             <Briefcase className="h-6 w-6" />
@@ -664,8 +697,16 @@ export function EmployeesPage({
                 <div className="h-36 animate-pulse rounded-2xl bg-slate-100" />
               </div>
             ) : detailError ? (
-              <div className="py-8 text-center text-sm text-[#E85D65]">
-                {detailError}
+              <div className="py-6">
+                <PageLoadError
+                  title="Unable to load employee profile"
+                  message={detailError}
+                  retrying={detailLoading}
+                  onRetry={() => {
+                    if (detailTargetId) openProfile(detailTargetId);
+                  }}
+                  variant="card"
+                />
               </div>
             ) : employeeDetail ? (
               <div className="mt-5 space-y-6">

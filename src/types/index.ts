@@ -249,6 +249,15 @@ export interface CalendarEvent {
   platform?: string;
 }
 
+export interface WorkspaceData {
+  summary: DashboardSummary;
+  employees: Employee[];
+  tasks: TaskRecord[];
+  posters: PosterRecord[];
+  reels: ReelRecord[];
+  calendarEvents: CalendarEvent[];
+}
+
 export type NavSection =
   | 'dashboard'
   | 'employees'

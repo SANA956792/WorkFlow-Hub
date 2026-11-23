@@ -14,7 +14,7 @@ export interface EmployeeInput {
 }
 
 export const employeeService = {
-  list: () => apiRequest<Employee[]>('/api/employees'),
+  list: (signal?: AbortSignal) => apiRequest<Employee[]>('/api/employees', { signal }),
   getDetail: (id: string) =>
     apiRequest<EmployeeDetail>(
       `/api/employees/${id}?today=${encodeURIComponent(getLocalTodayISO())}`

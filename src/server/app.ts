@@ -23,6 +23,7 @@ import {
   getEmployeeDetail,
   getStoredFileMeta,
   getTaskDetail,
+  getWorkspaceData,
   listEmployees,
   listPosters,
   listReels,
@@ -655,8 +656,19 @@ export function createApp() {
   });
 
   // ============================================================================
-  // DASHBOARD & CALENDAR
+  // CONSOLIDATED WORKSPACE, DASHBOARD & CALENDAR
   // ============================================================================
+
+  app.get('/api/workspace', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store, private');
+      const todayStr = getTodayString(req.query.today);
+      const workspace = await getWorkspaceData(todayStr);
+      res.json(workspace);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to load workspace data.' });
+    }
+  });
 
   app.get('/api/dashboard', requireAuth, async (req: AuthRequest, res) => {
     try {

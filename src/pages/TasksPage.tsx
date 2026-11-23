@@ -31,6 +31,7 @@ import {
 } from '../services/storageService';
 import { ThreeDotMenu } from '../components/ThreeDotMenu';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { PageLoadError } from '../components/PageLoadError';
 import {
   formatBytes,
   formatDisplayDate,
@@ -71,6 +72,9 @@ interface TasksPageProps {
   tasks: TaskRecord[];
   employees: Employee[];
   loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  onRetry: () => void;
   initialStatusFilter?: TaskStatus | 'All';
   initialDeadlineFilter?: 'all' | 'today' | 'upcoming' | 'overdue';
   initialSelectedTaskId?: string | null;
@@ -83,6 +87,9 @@ export function TasksPage({
   tasks,
   employees,
   loading,
+  loaded,
+  error,
+  onRetry,
   initialStatusFilter,
   initialDeadlineFilter,
   initialSelectedTaskId,
@@ -543,14 +550,32 @@ export function TasksPage({
         </select>
       </div>
 
+      {error && loaded && (
+        <PageLoadError
+          title="Could not refresh tasks"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="banner"
+        />
+      )}
+
       {/* Tasks List */}
-      {loading && tasks.length === 0 ? (
+      {loading && !loaded && tasks.length === 0 ? (
         <div className="space-y-3">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-24 animate-pulse rounded-2xl bg-slate-200" />
           ))}
         </div>
-      ) : filteredTasks.length === 0 ? (
+      ) : error && !loaded && tasks.length === 0 ? (
+        <PageLoadError
+          title="Unable to load tasks"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="card"
+        />
+      ) : loaded && filteredTasks.length === 0 ? (
         <div className="rounded-2xl border border-slate-200/80 bg-white p-12 text-center">
           <h3 className="text-base font-bold text-slate-900">
             {tasks.length === 0 ? 'No tasks created yet' : 'No tasks match your filters'}

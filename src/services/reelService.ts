@@ -24,7 +24,7 @@ export interface ReelInput {
 }
 
 export const reelService = {
-  list: () => apiRequest<ReelRecord[]>('/api/reels'),
+  list: (signal?: AbortSignal) => apiRequest<ReelRecord[]>('/api/reels', { signal }),
   create: (input: ReelInput) =>
     apiRequest<ReelRecord>('/api/reels', {
       method: 'POST',

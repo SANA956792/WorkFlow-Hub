@@ -1,12 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { CalendarEvent, NavSection } from '../types';
+import { PageLoadError } from '../components/PageLoadError';
 import { formatTime12h, getLocalTodayISO } from '../utils/dates';
 import { getCalendarEventColor } from '../utils/colors';
 
 interface CalendarPageProps {
   events: CalendarEvent[];
   loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  onRetry: () => void;
   onOpenEvent: (
     section: NavSection,
     opts: { taskId?: string; posterId?: string; reelId?: string }
@@ -33,6 +37,9 @@ function toISODate(d: Date): string {
 export function CalendarPage({
   events,
   loading,
+  loaded,
+  error,
+  onRetry,
   onOpenEvent,
 }: CalendarPageProps) {
   const [viewMode, setViewMode] = useState<'month' | 'week'>('month');
@@ -271,9 +278,27 @@ export function CalendarPage({
         </div>
       </div>
 
+      {error && loaded && (
+        <PageLoadError
+          title="Could not refresh calendar"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="banner"
+        />
+      )}
+
       {/* Calendar Grid */}
-      {loading && events.length === 0 ? (
+      {loading && !loaded && events.length === 0 ? (
         <div className="h-[520px] animate-pulse rounded-2xl bg-slate-200" />
+      ) : error && !loaded && events.length === 0 ? (
+        <PageLoadError
+          title="Unable to load calendar"
+          message={error}
+          retrying={loading}
+          onRetry={onRetry}
+          variant="card"
+        />
       ) : viewMode === 'month' ? (
         <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-xs">
           <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50">

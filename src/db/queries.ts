@@ -724,27 +724,56 @@ export async function createAppSession(params: {
 }
 
 export async function getValidAppSession(tokenHash: string) {
-  await ensureAdditiveWorkspaceSchema();
   const now = new Date();
-  const [row] = await db
-    .select()
-    .from(appSessions)
-    .where(
-      and(
-        eq(appSessions.tokenHash, tokenHash),
-        gt(appSessions.expiresAt, now)
+  let row: typeof appSessions.$inferSelect | undefined;
+
+  try {
+    const rows = await db
+      .select()
+      .from(appSessions)
+      .where(
+        and(
+          eq(appSessions.tokenHash, tokenHash),
+          gt(appSessions.expiresAt, now)
+        )
       )
-    )
-    .limit(1);
+      .limit(1);
+    row = rows[0];
+  } catch (error: any) {
+    const code = error?.code || error?.cause?.code;
+    if (code === '42P01') {
+      await ensureAdditiveWorkspaceSchema();
+      const rows = await db
+        .select()
+        .from(appSessions)
+        .where(
+          and(
+            eq(appSessions.tokenHash, tokenHash),
+            gt(appSessions.expiresAt, now)
+          )
+        )
+        .limit(1);
+      row = rows[0];
+    } else {
+      throw error;
+    }
+  }
 
   if (!row) return null;
 
-  // Throttle lastSeenAt updates to at most once per hour
+  // Throttle lastSeenAt updates to at most once per hour; await safely so no dangling socket remains on serverless freeze
   if (now.getTime() - row.lastSeenAt.getTime() > 60 * 60 * 1000) {
-    db.update(appSessions)
-      .set({ lastSeenAt: now })
-      .where(eq(appSessions.id, row.id))
-      .catch(() => {});
+    try {
+      await db
+        .update(appSessions)
+        .set({ lastSeenAt: now })
+        .where(eq(appSessions.id, row.id));
+    } catch (err: any) {
+      console.warn(
+        'Non-fatal session lastSeenAt update failed:',
+        err?.code || 'UPDATE_WARN'
+      );
+    }
   }
 
   return row;
@@ -779,22 +808,75 @@ export async function getEmployeeDetail(employeeId: string, todayStr: string) {
 
     if (!empRow) return null;
 
-    const allTasks = await listTasks();
-    const empTasks = allTasks.filter((t) =>
-      t.assignedEmployeeIds.includes(employeeId)
+    // Fetch only this employee's assigned task IDs, posters, and reels directly in SQL
+    const [empTaskLinks, empPosterRows, empReelRows] = await Promise.all([
+      db
+        .select({ taskId: taskAssignments.taskId })
+        .from(taskAssignments)
+        .where(eq(taskAssignments.employeeId, employeeId)),
+      db
+        .select()
+        .from(posters)
+        .where(
+          or(
+            eq(posters.assignedDesignerId, employeeId),
+            eq(posters.assignedWriterId, employeeId)
+          )
+        )
+        .orderBy(desc(posters.createdAt)),
+      db
+        .select()
+        .from(reels)
+        .where(
+          or(
+            eq(reels.assignedEditorId, employeeId),
+            eq(reels.assignedCreatorId, employeeId)
+          )
+        )
+        .orderBy(desc(reels.createdAt)),
+    ]);
+
+    const taskIds = Array.from(new Set(empTaskLinks.map((a) => a.taskId)));
+
+    const [empTaskRows, empTaskAssignmentRows] =
+      taskIds.length > 0
+        ? await Promise.all([
+            db
+              .select()
+              .from(tasks)
+              .where(inArray(tasks.id, taskIds))
+              .orderBy(desc(tasks.createdAt)),
+            db
+              .select()
+              .from(taskAssignments)
+              .where(inArray(taskAssignments.taskId, taskIds)),
+          ])
+        : [[], []];
+
+    const referencedEmpIds = new Set<string>([employeeId]);
+    for (const a of empTaskAssignmentRows) {
+      referencedEmpIds.add(a.employeeId);
+    }
+    for (const p of empPosterRows) {
+      if (p.assignedDesignerId) referencedEmpIds.add(p.assignedDesignerId);
+      if (p.assignedWriterId) referencedEmpIds.add(p.assignedWriterId);
+    }
+    for (const r of empReelRows) {
+      if (r.assignedEditorId) referencedEmpIds.add(r.assignedEditorId);
+      if (r.assignedCreatorId) referencedEmpIds.add(r.assignedCreatorId);
+    }
+
+    const relatedEmployees = await db
+      .select()
+      .from(employees)
+      .where(inArray(employees.id, Array.from(referencedEmpIds)));
+    const empMap = new Map(
+      relatedEmployees.map((e) => [e.id, serializeEmployee(e)])
     );
 
-    const allPosters = await listPosters();
-    const empPosters = allPosters.filter(
-      (p) =>
-        p.assignedDesignerId === employeeId || p.assignedWriterId === employeeId
-    );
-
-    const allReels = await listReels();
-    const empReels = allReels.filter(
-      (r) =>
-        r.assignedEditorId === employeeId || r.assignedCreatorId === employeeId
-    );
+    const empTasks = mapTaskRows(empTaskRows, empTaskAssignmentRows, empMap);
+    const empPosters = mapPosterRows(empPosterRows, empMap);
+    const empReels = mapReelRows(empReelRows, empMap);
 
     const relatedEntityIds = [
       employeeId,
@@ -1029,46 +1111,58 @@ export async function deleteEmployee(
 // TASKS
 // ============================================================================
 
-export async function listTasks() {
+type SerializedEmployee = ReturnType<typeof serializeEmployee>;
+
+function mapTaskRows(
+  taskRows: (typeof tasks.$inferSelect)[],
+  assignmentRows: (typeof taskAssignments.$inferSelect)[],
+  empMap: Map<string, SerializedEmployee>
+) {
+  const assignMap = new Map<string, SerializedEmployee[]>();
+  for (const a of assignmentRows) {
+    const emp = empMap.get(a.employeeId);
+    if (!emp) continue;
+    const list = assignMap.get(a.taskId) ?? [];
+    list.push(emp);
+    assignMap.set(a.taskId, list);
+  }
+
+  return taskRows.map((t) => {
+    const assignedEmployees = assignMap.get(t.id) ?? [];
+    return {
+      id: t.id,
+      taskCode: t.taskCode,
+      title: t.title,
+      description: t.description,
+      category: t.category,
+      startDate: t.startDate ?? null,
+      dueDate: t.dueDate ?? null,
+      priority: t.priority as any,
+      instructions: t.instructions,
+      attachments: signAttachmentList(t.attachments),
+      referenceLinks: Array.isArray(t.referenceLinks) ? t.referenceLinks : [],
+      status: t.status as any,
+      assignedEmployees,
+      assignedEmployeeIds: assignedEmployees.map((e) => e.id),
+      createdAt: t.createdAt.toISOString(),
+      updatedAt: t.updatedAt.toISOString(),
+    };
+  });
+}
+
+export async function listTasks(preloadedEmpMap?: Map<string, SerializedEmployee>) {
   try {
     const [taskRows, assignmentRows, employeeRows] = await Promise.all([
       db.select().from(tasks).orderBy(desc(tasks.createdAt)),
       db.select().from(taskAssignments),
-      db.select().from(employees),
+      preloadedEmpMap ? Promise.resolve(null) : db.select().from(employees),
     ]);
 
-    const empMap = new Map(employeeRows.map((e) => [e.id, serializeEmployee(e)]));
-    const assignMap = new Map<string, ReturnType<typeof serializeEmployee>[]>();
+    const empMap =
+      preloadedEmpMap ??
+      new Map((employeeRows ?? []).map((e) => [e.id, serializeEmployee(e)]));
 
-    for (const a of assignmentRows) {
-      const emp = empMap.get(a.employeeId);
-      if (!emp) continue;
-      const list = assignMap.get(a.taskId) ?? [];
-      list.push(emp);
-      assignMap.set(a.taskId, list);
-    }
-
-    return taskRows.map((t) => {
-      const assignedEmployees = assignMap.get(t.id) ?? [];
-      return {
-        id: t.id,
-        taskCode: t.taskCode,
-        title: t.title,
-        description: t.description,
-        category: t.category,
-        startDate: t.startDate ?? null,
-        dueDate: t.dueDate ?? null,
-        priority: t.priority as any,
-        instructions: t.instructions,
-        attachments: signAttachmentList(t.attachments),
-        referenceLinks: Array.isArray(t.referenceLinks) ? t.referenceLinks : [],
-        status: t.status as any,
-        assignedEmployees,
-        assignedEmployeeIds: assignedEmployees.map((e) => e.id),
-        createdAt: t.createdAt.toISOString(),
-        updatedAt: t.updatedAt.toISOString(),
-      };
-    });
+    return mapTaskRows(taskRows, assignmentRows, empMap);
   } catch (error) {
     console.error('Database query failed in listTasks:', error);
     throw new Error('Unable to load tasks.', { cause: error });
@@ -1407,45 +1501,54 @@ export async function deleteTask(
 // POSTERS
 // ============================================================================
 
-export async function listPosters() {
+function mapPosterRows(
+  posterRows: (typeof posters.$inferSelect)[],
+  empMap: Map<string, SerializedEmployee>
+) {
+  return posterRows.map((p) => ({
+    id: p.id,
+    posterCode: p.posterCode,
+    title: p.title,
+    description: p.description,
+    campaignName: p.campaignName,
+    imageFileId: p.imageFileId ?? null,
+    imageUrl: p.imageFileId
+      ? buildSignedFileUrl(p.imageFileId)
+      : p.imageUrl ?? null,
+    assignedDesignerId: p.assignedDesignerId ?? null,
+    assignedWriterId: p.assignedWriterId ?? null,
+    assignedDesigner: p.assignedDesignerId
+      ? empMap.get(p.assignedDesignerId) ?? null
+      : null,
+    assignedWriter: p.assignedWriterId
+      ? empMap.get(p.assignedWriterId) ?? null
+      : null,
+    platform: p.platform,
+    designDeadline: p.designDeadline ?? null,
+    publishingDate: p.publishingDate ?? null,
+    publishingTime: p.publishingTime ?? null,
+    caption: p.caption,
+    hashtags: p.hashtags,
+    referenceLinks: Array.isArray(p.referenceLinks) ? p.referenceLinks : [],
+    notes: p.notes,
+    status: p.status as any,
+    createdAt: p.createdAt.toISOString(),
+    updatedAt: p.updatedAt.toISOString(),
+  }));
+}
+
+export async function listPosters(preloadedEmpMap?: Map<string, SerializedEmployee>) {
   try {
     const [posterRows, employeeRows] = await Promise.all([
       db.select().from(posters).orderBy(desc(posters.createdAt)),
-      db.select().from(employees),
+      preloadedEmpMap ? Promise.resolve(null) : db.select().from(employees),
     ]);
 
-    const empMap = new Map(employeeRows.map((e) => [e.id, serializeEmployee(e)]));
+    const empMap =
+      preloadedEmpMap ??
+      new Map((employeeRows ?? []).map((e) => [e.id, serializeEmployee(e)]));
 
-    return posterRows.map((p) => ({
-      id: p.id,
-      posterCode: p.posterCode,
-      title: p.title,
-      description: p.description,
-      campaignName: p.campaignName,
-      imageFileId: p.imageFileId ?? null,
-      imageUrl: p.imageFileId
-        ? buildSignedFileUrl(p.imageFileId)
-        : p.imageUrl ?? null,
-      assignedDesignerId: p.assignedDesignerId ?? null,
-      assignedWriterId: p.assignedWriterId ?? null,
-      assignedDesigner: p.assignedDesignerId
-        ? empMap.get(p.assignedDesignerId) ?? null
-        : null,
-      assignedWriter: p.assignedWriterId
-        ? empMap.get(p.assignedWriterId) ?? null
-        : null,
-      platform: p.platform,
-      designDeadline: p.designDeadline ?? null,
-      publishingDate: p.publishingDate ?? null,
-      publishingTime: p.publishingTime ?? null,
-      caption: p.caption,
-      hashtags: p.hashtags,
-      referenceLinks: Array.isArray(p.referenceLinks) ? p.referenceLinks : [],
-      notes: p.notes,
-      status: p.status as any,
-      createdAt: p.createdAt.toISOString(),
-      updatedAt: p.updatedAt.toISOString(),
-    }));
+    return mapPosterRows(posterRows, empMap);
   } catch (error) {
     console.error('Database query failed in listPosters:', error);
     throw new Error('Unable to load posters.', { cause: error });
@@ -1735,51 +1838,60 @@ export async function deletePoster(
 // REELS
 // ============================================================================
 
-export async function listReels() {
+function mapReelRows(
+  reelRows: (typeof reels.$inferSelect)[],
+  empMap: Map<string, SerializedEmployee>
+) {
+  return reelRows.map((r) => ({
+    id: r.id,
+    reelCode: r.reelCode,
+    title: r.title,
+    description: r.description,
+    campaignName: r.campaignName,
+    referenceVideoFileId: r.referenceVideoFileId ?? null,
+    referenceVideoUrl: r.referenceVideoFileId
+      ? buildSignedFileUrl(r.referenceVideoFileId)
+      : r.referenceVideoUrl ?? null,
+    referenceVideoLink: r.referenceVideoLink,
+    finalVideoFileId: r.finalVideoFileId ?? null,
+    finalVideoUrl: r.finalVideoFileId
+      ? buildSignedFileUrl(r.finalVideoFileId)
+      : r.finalVideoUrl ?? null,
+    assignedEditorId: r.assignedEditorId ?? null,
+    assignedCreatorId: r.assignedCreatorId ?? null,
+    assignedEditor: r.assignedEditorId
+      ? empMap.get(r.assignedEditorId) ?? null
+      : null,
+    assignedCreator: r.assignedCreatorId
+      ? empMap.get(r.assignedCreatorId) ?? null
+      : null,
+    platform: r.platform,
+    editingDeadline: r.editingDeadline ?? null,
+    publishingDate: r.publishingDate ?? null,
+    publishingTime: r.publishingTime ?? null,
+    script: r.script,
+    caption: r.caption,
+    hashtags: r.hashtags,
+    referenceLinks: Array.isArray(r.referenceLinks) ? r.referenceLinks : [],
+    notes: r.notes,
+    status: r.status as any,
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: r.updatedAt.toISOString(),
+  }));
+}
+
+export async function listReels(preloadedEmpMap?: Map<string, SerializedEmployee>) {
   try {
     const [reelRows, employeeRows] = await Promise.all([
       db.select().from(reels).orderBy(desc(reels.createdAt)),
-      db.select().from(employees),
+      preloadedEmpMap ? Promise.resolve(null) : db.select().from(employees),
     ]);
 
-    const empMap = new Map(employeeRows.map((e) => [e.id, serializeEmployee(e)]));
+    const empMap =
+      preloadedEmpMap ??
+      new Map((employeeRows ?? []).map((e) => [e.id, serializeEmployee(e)]));
 
-    return reelRows.map((r) => ({
-      id: r.id,
-      reelCode: r.reelCode,
-      title: r.title,
-      description: r.description,
-      campaignName: r.campaignName,
-      referenceVideoFileId: r.referenceVideoFileId ?? null,
-      referenceVideoUrl: r.referenceVideoFileId
-        ? buildSignedFileUrl(r.referenceVideoFileId)
-        : r.referenceVideoUrl ?? null,
-      referenceVideoLink: r.referenceVideoLink,
-      finalVideoFileId: r.finalVideoFileId ?? null,
-      finalVideoUrl: r.finalVideoFileId
-        ? buildSignedFileUrl(r.finalVideoFileId)
-        : r.finalVideoUrl ?? null,
-      assignedEditorId: r.assignedEditorId ?? null,
-      assignedCreatorId: r.assignedCreatorId ?? null,
-      assignedEditor: r.assignedEditorId
-        ? empMap.get(r.assignedEditorId) ?? null
-        : null,
-      assignedCreator: r.assignedCreatorId
-        ? empMap.get(r.assignedCreatorId) ?? null
-        : null,
-      platform: r.platform,
-      editingDeadline: r.editingDeadline ?? null,
-      publishingDate: r.publishingDate ?? null,
-      publishingTime: r.publishingTime ?? null,
-      script: r.script,
-      caption: r.caption,
-      hashtags: r.hashtags,
-      referenceLinks: Array.isArray(r.referenceLinks) ? r.referenceLinks : [],
-      notes: r.notes,
-      status: r.status as any,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
-    }));
+    return mapReelRows(reelRows, empMap);
   } catch (error) {
     console.error('Database query failed in listReels:', error);
     throw new Error('Unable to load reels.', { cause: error });
@@ -2106,188 +2218,355 @@ export async function deleteReel(
 // DASHBOARD & CALENDAR (DERIVED FROM REAL RECORDS)
 // ============================================================================
 
+function buildDashboardSummaryFromLists(params: {
+  todayStr: string;
+  allEmployees: SerializedEmployee[];
+  allTasks: ReturnType<typeof mapTaskRows>;
+  allPosters: ReturnType<typeof mapPosterRows>;
+  allReels: ReturnType<typeof mapReelRows>;
+  recentActivityRows: (typeof activityLogs.$inferSelect)[];
+}) {
+  const {
+    todayStr,
+    allEmployees,
+    allTasks,
+    allPosters,
+    allReels,
+    recentActivityRows,
+  } = params;
+
+  const kpis = {
+    totalEmployees: allEmployees.length,
+    totalTasks: allTasks.length,
+    pendingTasks: allTasks.filter((t) => t.status === 'Pending').length,
+    inProgressTasks: allTasks.filter((t) => t.status === 'In Progress').length,
+    underReviewTasks: allTasks.filter((t) => t.status === 'Under Review').length,
+    completedTasks: allTasks.filter((t) => t.status === 'Completed').length,
+    overdueTasks: allTasks.filter(
+      (t) =>
+        t.dueDate &&
+        t.dueDate < todayStr &&
+        t.status !== 'Completed' &&
+        t.status !== 'Cancelled'
+    ).length,
+    totalPosters: allPosters.length,
+    totalReels: allReels.length,
+  };
+
+  const todaysWork = allTasks.filter(
+    (t) =>
+      t.dueDate === todayStr &&
+      t.status !== 'Completed' &&
+      t.status !== 'Cancelled'
+  );
+
+  const upcomingDeadlines: any[] = [];
+  for (const t of allTasks) {
+    if (
+      t.dueDate &&
+      t.dueDate >= todayStr &&
+      t.status !== 'Completed' &&
+      t.status !== 'Cancelled'
+    ) {
+      upcomingDeadlines.push({
+        id: t.id,
+        entityType: 'task',
+        code: t.taskCode,
+        title: t.title,
+        deadlineDate: t.dueDate,
+        deadlineKind: 'Task Due',
+        status: t.status,
+        assigneeNames: t.assignedEmployees.map((e) => e.fullName),
+      });
+    }
+  }
+  for (const p of allPosters) {
+    if (
+      p.designDeadline &&
+      p.designDeadline >= todayStr &&
+      p.status !== 'Published' &&
+      p.status !== 'Approved'
+    ) {
+      upcomingDeadlines.push({
+        id: p.id,
+        entityType: 'poster',
+        code: p.posterCode,
+        title: p.title,
+        deadlineDate: p.designDeadline,
+        deadlineKind: 'Poster Design',
+        status: p.status,
+        assigneeNames: [
+          p.assignedDesigner?.fullName,
+          p.assignedWriter?.fullName,
+        ].filter(Boolean) as string[],
+      });
+    }
+  }
+  for (const r of allReels) {
+    if (
+      r.editingDeadline &&
+      r.editingDeadline >= todayStr &&
+      r.status !== 'Published' &&
+      r.status !== 'Approved'
+    ) {
+      upcomingDeadlines.push({
+        id: r.id,
+        entityType: 'reel',
+        code: r.reelCode,
+        title: r.title,
+        deadlineDate: r.editingDeadline,
+        deadlineKind: 'Reel Editing',
+        status: r.status,
+        assigneeNames: [
+          r.assignedEditor?.fullName,
+          r.assignedCreator?.fullName,
+        ].filter(Boolean) as string[],
+      });
+    }
+  }
+  upcomingDeadlines.sort((a, b) => a.deadlineDate.localeCompare(b.deadlineDate));
+
+  const upcomingPublishing: any[] = [];
+  for (const p of allPosters) {
+    if (
+      p.publishingDate &&
+      p.publishingDate >= todayStr &&
+      p.status !== 'Published'
+    ) {
+      upcomingPublishing.push({
+        id: p.id,
+        entityType: 'poster',
+        code: p.posterCode,
+        title: p.title,
+        platform: p.platform,
+        publishingDate: p.publishingDate,
+        publishingTime: p.publishingTime,
+        status: p.status,
+        thumbnailUrl: p.imageUrl,
+      });
+    }
+  }
+  for (const r of allReels) {
+    if (
+      r.publishingDate &&
+      r.publishingDate >= todayStr &&
+      r.status !== 'Published'
+    ) {
+      upcomingPublishing.push({
+        id: r.id,
+        entityType: 'reel',
+        code: r.reelCode,
+        title: r.title,
+        platform: r.platform,
+        publishingDate: r.publishingDate,
+        publishingTime: r.publishingTime,
+        status: r.status,
+        thumbnailUrl: null,
+      });
+    }
+  }
+  upcomingPublishing.sort((a, b) => {
+    const dateCmp = a.publishingDate.localeCompare(b.publishingDate);
+    if (dateCmp !== 0) return dateCmp;
+    return (a.publishingTime || '99:99').localeCompare(b.publishingTime || '99:99');
+  });
+
+  // Index task counts per employee in O(tasks) instead of nested O(employees * tasks)
+  const empTaskStats = new Map<
+    string,
+    { assigned: number; completed: number; pending: number }
+  >();
+  for (const t of allTasks) {
+    const isCompleted = t.status === 'Completed';
+    const isPending = t.status !== 'Completed' && t.status !== 'Cancelled';
+    for (const empId of t.assignedEmployeeIds) {
+      const curr = empTaskStats.get(empId) ?? {
+        assigned: 0,
+        completed: 0,
+        pending: 0,
+      };
+      curr.assigned += 1;
+      if (isCompleted) curr.completed += 1;
+      if (isPending) curr.pending += 1;
+      empTaskStats.set(empId, curr);
+    }
+  }
+
+  const employeeOverview = allEmployees.map((emp) => {
+    const counts = empTaskStats.get(emp.id) ?? {
+      assigned: 0,
+      completed: 0,
+      pending: 0,
+    };
+    return {
+      id: emp.id,
+      employeeCode: emp.employeeCode,
+      fullName: emp.fullName,
+      department: emp.department,
+      designation: emp.designation,
+      profileImageUrl: emp.profileImageUrl,
+      isActive: emp.isActive,
+      assignedTasks: counts.assigned,
+      completedTasks: counts.completed,
+      pendingTasks: counts.pending,
+    };
+  });
+
+  return {
+    kpis,
+    todaysWork,
+    upcomingDeadlines: upcomingDeadlines.slice(0, 10),
+    recentActivities: recentActivityRows.map((a) => ({
+      ...a,
+      entityType: a.entityType as any,
+      createdAt: a.createdAt.toISOString(),
+    })),
+    upcomingPublishing: upcomingPublishing.slice(0, 10),
+    employeeOverview,
+  };
+}
+
+function buildCalendarEventsFromRows(params: {
+  taskRows: { id: string; title: string; dueDate: string | null; status: string }[];
+  posterRows: {
+    id: string;
+    title: string;
+    designDeadline: string | null;
+    publishingDate: string | null;
+    publishingTime: string | null;
+    status: string;
+    platform: string;
+  }[];
+  reelRows: {
+    id: string;
+    title: string;
+    editingDeadline: string | null;
+    publishingDate: string | null;
+    publishingTime: string | null;
+    status: string;
+    platform: string;
+  }[];
+}) {
+  const events: any[] = [];
+
+  for (const t of params.taskRows) {
+    if (t.dueDate) {
+      events.push({
+        id: `task-${t.id}`,
+        sourceId: t.id,
+        entityType: 'task',
+        eventType: 'task_deadline',
+        label: 'Task Deadline',
+        title: t.title,
+        date: t.dueDate,
+        time: null,
+        status: t.status,
+      });
+    }
+  }
+
+  for (const p of params.posterRows) {
+    if (p.designDeadline) {
+      events.push({
+        id: `poster-design-${p.id}`,
+        sourceId: p.id,
+        entityType: 'poster',
+        eventType: 'poster_design_deadline',
+        label: 'Poster Design Deadline',
+        title: p.title,
+        date: p.designDeadline,
+        time: null,
+        status: p.status,
+        platform: p.platform,
+      });
+    }
+    if (p.publishingDate) {
+      events.push({
+        id: `poster-pub-${p.id}`,
+        sourceId: p.id,
+        entityType: 'poster',
+        eventType: 'poster_publishing',
+        label: 'Poster Publishing',
+        title: p.title,
+        date: p.publishingDate,
+        time: p.publishingTime,
+        status: p.status,
+        platform: p.platform,
+      });
+    }
+  }
+
+  for (const r of params.reelRows) {
+    if (r.editingDeadline) {
+      events.push({
+        id: `reel-edit-${r.id}`,
+        sourceId: r.id,
+        entityType: 'reel',
+        eventType: 'reel_editing_deadline',
+        label: 'Reel Editing Deadline',
+        title: r.title,
+        date: r.editingDeadline,
+        time: null,
+        status: r.status,
+        platform: r.platform,
+      });
+    }
+    if (r.publishingDate) {
+      events.push({
+        id: `reel-pub-${r.id}`,
+        sourceId: r.id,
+        entityType: 'reel',
+        eventType: 'reel_publishing',
+        label: 'Reel Publishing',
+        title: r.title,
+        date: r.publishingDate,
+        time: r.publishingTime,
+        status: r.status,
+        platform: r.platform,
+      });
+    }
+  }
+
+  return events;
+}
+
 export async function getDashboardSummary(todayStr: string) {
   try {
-    const [allEmployees, allTasks, allPosters, allReels, recentActivityRows] =
-      await Promise.all([
-        listEmployees(),
-        listTasks(),
-        listPosters(),
-        listReels(),
-        db
-          .select()
-          .from(activityLogs)
-          .orderBy(desc(activityLogs.createdAt))
-          .limit(15),
-      ]);
+    // Fetch each underlying table once (instead of scanning employees 4 times)
+    const [
+      employeeRows,
+      taskRows,
+      assignmentRows,
+      posterRows,
+      reelRows,
+      recentActivityRows,
+    ] = await Promise.all([
+      db.select().from(employees).orderBy(desc(employees.createdAt)),
+      db.select().from(tasks).orderBy(desc(tasks.createdAt)),
+      db.select().from(taskAssignments),
+      db.select().from(posters).orderBy(desc(posters.createdAt)),
+      db.select().from(reels).orderBy(desc(reels.createdAt)),
+      db
+        .select()
+        .from(activityLogs)
+        .orderBy(desc(activityLogs.createdAt))
+        .limit(15),
+    ]);
 
-    const kpis = {
-      totalEmployees: allEmployees.length,
-      totalTasks: allTasks.length,
-      pendingTasks: allTasks.filter((t) => t.status === 'Pending').length,
-      inProgressTasks: allTasks.filter((t) => t.status === 'In Progress').length,
-      underReviewTasks: allTasks.filter((t) => t.status === 'Under Review').length,
-      completedTasks: allTasks.filter((t) => t.status === 'Completed').length,
-      overdueTasks: allTasks.filter(
-        (t) =>
-          t.dueDate &&
-          t.dueDate < todayStr &&
-          t.status !== 'Completed' &&
-          t.status !== 'Cancelled'
-      ).length,
-      totalPosters: allPosters.length,
-      totalReels: allReels.length,
-    };
+    const allEmployees = employeeRows.map(serializeEmployee);
+    const empMap = new Map(allEmployees.map((e) => [e.id, e]));
+    const allTasks = mapTaskRows(taskRows, assignmentRows, empMap);
+    const allPosters = mapPosterRows(posterRows, empMap);
+    const allReels = mapReelRows(reelRows, empMap);
 
-    const todaysWork = allTasks.filter(
-      (t) =>
-        t.dueDate === todayStr &&
-        t.status !== 'Completed' &&
-        t.status !== 'Cancelled'
-    );
-
-    const upcomingDeadlines: any[] = [];
-    for (const t of allTasks) {
-      if (
-        t.dueDate &&
-        t.dueDate >= todayStr &&
-        t.status !== 'Completed' &&
-        t.status !== 'Cancelled'
-      ) {
-        upcomingDeadlines.push({
-          id: t.id,
-          entityType: 'task',
-          code: t.taskCode,
-          title: t.title,
-          deadlineDate: t.dueDate,
-          deadlineKind: 'Task Due',
-          status: t.status,
-          assigneeNames: t.assignedEmployees.map((e) => e.fullName),
-        });
-      }
-    }
-    for (const p of allPosters) {
-      if (
-        p.designDeadline &&
-        p.designDeadline >= todayStr &&
-        p.status !== 'Published' &&
-        p.status !== 'Approved'
-      ) {
-        upcomingDeadlines.push({
-          id: p.id,
-          entityType: 'poster',
-          code: p.posterCode,
-          title: p.title,
-          deadlineDate: p.designDeadline,
-          deadlineKind: 'Poster Design',
-          status: p.status,
-          assigneeNames: [p.assignedDesigner?.fullName, p.assignedWriter?.fullName].filter(
-            Boolean
-          ) as string[],
-        });
-      }
-    }
-    for (const r of allReels) {
-      if (
-        r.editingDeadline &&
-        r.editingDeadline >= todayStr &&
-        r.status !== 'Published' &&
-        r.status !== 'Approved'
-      ) {
-        upcomingDeadlines.push({
-          id: r.id,
-          entityType: 'reel',
-          code: r.reelCode,
-          title: r.title,
-          deadlineDate: r.editingDeadline,
-          deadlineKind: 'Reel Editing',
-          status: r.status,
-          assigneeNames: [r.assignedEditor?.fullName, r.assignedCreator?.fullName].filter(
-            Boolean
-          ) as string[],
-        });
-      }
-    }
-    upcomingDeadlines.sort((a, b) => a.deadlineDate.localeCompare(b.deadlineDate));
-
-    const upcomingPublishing: any[] = [];
-    for (const p of allPosters) {
-      if (
-        p.publishingDate &&
-        p.publishingDate >= todayStr &&
-        p.status !== 'Published'
-      ) {
-        upcomingPublishing.push({
-          id: p.id,
-          entityType: 'poster',
-          code: p.posterCode,
-          title: p.title,
-          platform: p.platform,
-          publishingDate: p.publishingDate,
-          publishingTime: p.publishingTime,
-          status: p.status,
-          thumbnailUrl: p.imageUrl,
-        });
-      }
-    }
-    for (const r of allReels) {
-      if (
-        r.publishingDate &&
-        r.publishingDate >= todayStr &&
-        r.status !== 'Published'
-      ) {
-        upcomingPublishing.push({
-          id: r.id,
-          entityType: 'reel',
-          code: r.reelCode,
-          title: r.title,
-          platform: r.platform,
-          publishingDate: r.publishingDate,
-          publishingTime: r.publishingTime,
-          status: r.status,
-          thumbnailUrl: null,
-        });
-      }
-    }
-    upcomingPublishing.sort((a, b) => {
-      const dateCmp = a.publishingDate.localeCompare(b.publishingDate);
-      if (dateCmp !== 0) return dateCmp;
-      return (a.publishingTime || '99:99').localeCompare(b.publishingTime || '99:99');
+    return buildDashboardSummaryFromLists({
+      todayStr,
+      allEmployees,
+      allTasks,
+      allPosters,
+      allReels,
+      recentActivityRows,
     });
-
-    const employeeOverview = allEmployees.map((emp) => {
-      const assigned = allTasks.filter((t) => t.assignedEmployeeIds.includes(emp.id));
-      const completed = assigned.filter((t) => t.status === 'Completed').length;
-      const pending = assigned.filter(
-        (t) =>
-          t.status !== 'Completed' && t.status !== 'Cancelled'
-      ).length;
-      return {
-        id: emp.id,
-        employeeCode: emp.employeeCode,
-        fullName: emp.fullName,
-        department: emp.department,
-        designation: emp.designation,
-        profileImageUrl: emp.profileImageUrl,
-        isActive: emp.isActive,
-        assignedTasks: assigned.length,
-        completedTasks: completed,
-        pendingTasks: pending,
-      };
-    });
-
-    return {
-      kpis,
-      todaysWork,
-      upcomingDeadlines: upcomingDeadlines.slice(0, 10),
-      recentActivities: recentActivityRows.map((a) => ({
-        ...a,
-        entityType: a.entityType as any,
-        createdAt: a.createdAt.toISOString(),
-      })),
-      upcomingPublishing: upcomingPublishing.slice(0, 10),
-      employeeOverview,
-    };
   } catch (error) {
     console.error('Database query failed in getDashboardSummary:', error);
     throw new Error('Unable to load dashboard summary.', { cause: error });
@@ -2296,95 +2575,103 @@ export async function getDashboardSummary(todayStr: string) {
 
 export async function getCalendarEvents() {
   try {
-    const [allTasks, allPosters, allReels] = await Promise.all([
-      listTasks(),
-      listPosters(),
-      listReels(),
+    // Fetch only required calendar columns without scanning employees or large JSONB/text payloads
+    const [taskRows, posterRows, reelRows] = await Promise.all([
+      db
+        .select({
+          id: tasks.id,
+          title: tasks.title,
+          dueDate: tasks.dueDate,
+          status: tasks.status,
+        })
+        .from(tasks),
+      db
+        .select({
+          id: posters.id,
+          title: posters.title,
+          designDeadline: posters.designDeadline,
+          publishingDate: posters.publishingDate,
+          publishingTime: posters.publishingTime,
+          status: posters.status,
+          platform: posters.platform,
+        })
+        .from(posters),
+      db
+        .select({
+          id: reels.id,
+          title: reels.title,
+          editingDeadline: reels.editingDeadline,
+          publishingDate: reels.publishingDate,
+          publishingTime: reels.publishingTime,
+          status: reels.status,
+          platform: reels.platform,
+        })
+        .from(reels),
     ]);
 
-    const events: any[] = [];
-
-    for (const t of allTasks) {
-      if (t.dueDate) {
-        events.push({
-          id: `task-${t.id}`,
-          sourceId: t.id,
-          entityType: 'task',
-          eventType: 'task_deadline',
-          label: 'Task Deadline',
-          title: t.title,
-          date: t.dueDate,
-          time: null,
-          status: t.status,
-        });
-      }
-    }
-
-    for (const p of allPosters) {
-      if (p.designDeadline) {
-        events.push({
-          id: `poster-design-${p.id}`,
-          sourceId: p.id,
-          entityType: 'poster',
-          eventType: 'poster_design_deadline',
-          label: 'Poster Design Deadline',
-          title: p.title,
-          date: p.designDeadline,
-          time: null,
-          status: p.status,
-          platform: p.platform,
-        });
-      }
-      if (p.publishingDate) {
-        events.push({
-          id: `poster-pub-${p.id}`,
-          sourceId: p.id,
-          entityType: 'poster',
-          eventType: 'poster_publishing',
-          label: 'Poster Publishing',
-          title: p.title,
-          date: p.publishingDate,
-          time: p.publishingTime,
-          status: p.status,
-          platform: p.platform,
-        });
-      }
-    }
-
-    for (const r of allReels) {
-      if (r.editingDeadline) {
-        events.push({
-          id: `reel-edit-${r.id}`,
-          sourceId: r.id,
-          entityType: 'reel',
-          eventType: 'reel_editing_deadline',
-          label: 'Reel Editing Deadline',
-          title: r.title,
-          date: r.editingDeadline,
-          time: null,
-          status: r.status,
-          platform: r.platform,
-        });
-      }
-      if (r.publishingDate) {
-        events.push({
-          id: `reel-pub-${r.id}`,
-          sourceId: r.id,
-          entityType: 'reel',
-          eventType: 'reel_publishing',
-          label: 'Reel Publishing',
-          title: r.title,
-          date: r.publishingDate,
-          time: r.publishingTime,
-          status: r.status,
-          platform: r.platform,
-        });
-      }
-    }
-
-    return events;
+    return buildCalendarEventsFromRows({ taskRows, posterRows, reelRows });
   } catch (error) {
     console.error('Database query failed in getCalendarEvents:', error);
     throw new Error('Unable to load calendar events.', { cause: error });
+  }
+}
+
+/**
+ * Consolidated single-round-trip workspace loader used by GET /api/workspace.
+ * Fetches each table once instead of 6 parallel HTTP requests triggering 30+ queries.
+ */
+export async function getWorkspaceData(todayStr: string) {
+  try {
+    const [
+      employeeRows,
+      taskRows,
+      assignmentRows,
+      posterRows,
+      reelRows,
+      recentActivityRows,
+    ] = await Promise.all([
+      db.select().from(employees).orderBy(desc(employees.createdAt)),
+      db.select().from(tasks).orderBy(desc(tasks.createdAt)),
+      db.select().from(taskAssignments),
+      db.select().from(posters).orderBy(desc(posters.createdAt)),
+      db.select().from(reels).orderBy(desc(reels.createdAt)),
+      db
+        .select()
+        .from(activityLogs)
+        .orderBy(desc(activityLogs.createdAt))
+        .limit(15),
+    ]);
+
+    const allEmployees = employeeRows.map(serializeEmployee);
+    const empMap = new Map(allEmployees.map((e) => [e.id, e]));
+    const allTasks = mapTaskRows(taskRows, assignmentRows, empMap);
+    const allPosters = mapPosterRows(posterRows, empMap);
+    const allReels = mapReelRows(reelRows, empMap);
+
+    const summary = buildDashboardSummaryFromLists({
+      todayStr,
+      allEmployees,
+      allTasks,
+      allPosters,
+      allReels,
+      recentActivityRows,
+    });
+    const calendarEvents = buildCalendarEventsFromRows({
+      taskRows,
+      posterRows,
+      reelRows,
+    });
+
+    return {
+      summary,
+      employees: allEmployees,
+      tasks: allTasks,
+      posters: allPosters,
+      reels: allReels,
+      calendarEvents,
+    };
+  } catch (error) {
+    console.error('Database query failed in getWorkspaceData:', error);
+    throw new Error('Unable to load workspace data.', { cause: error });
   }
 }

@@ -5,10 +5,34 @@ import { getValidAppSession } from '../db/queries.ts';
 export const SESSION_COOKIE_NAME = 'wo_session';
 export const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
-const FILE_TOKEN_SECRET =
-  process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16
-    ? process.env.SESSION_SECRET
-    : crypto.randomBytes(32).toString('hex');
+function resolveFileTokenSecret(): string {
+  const configured = process.env.SESSION_SECRET?.trim();
+  if (configured && configured.length >= 16) {
+    return configured;
+  }
+
+  // Derive a consistent signing key across all serverless instances from shared server env
+  const sharedEnvParts = [
+    process.env.COMPANY_ACCESS_CODE,
+    process.env.POSTGRES_URL,
+    process.env.SQL_PASSWORD,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_URL,
+  ]
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    .join('|');
+
+  if (sharedEnvParts) {
+    return crypto
+      .createHmac('sha256', 'workflow-hub-file-signing-v1')
+      .update(sharedEnvParts)
+      .digest('hex');
+  }
+
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const FILE_TOKEN_SECRET = resolveFileTokenSecret();
 
 export function signFileAccessToken(fileId: string): string {
   const hmac = crypto.createHmac('sha256', FILE_TOKEN_SECRET);
@@ -100,6 +124,13 @@ function isHttpsRequest(req: Request): boolean {
   return req.secure || forwardedProto === 'https' || req.protocol === 'https';
 }
 
+function isEmbeddedIframeRequest(req: Request): boolean {
+  const fetchDest = String(req.headers['sec-fetch-dest'] || '').toLowerCase();
+  const fetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  const embeddedCtx = String(req.headers['x-embedded-context'] || '').toLowerCase();
+  return fetchDest === 'iframe' || fetchSite === 'cross-site' || embeddedCtx === 'iframe';
+}
+
 export function setPersistentSessionCookie(
   req: Request,
   res: Response,
@@ -112,20 +143,31 @@ export function setPersistentSessionCookie(
     rawToken
   )}; Max-Age=${SESSION_MAX_AGE_SECONDS}; Expires=${expiresAt}; Path=/; HttpOnly`;
 
-  const cookie = isHttpsRequest(req)
-    ? `${base}; Secure; SameSite=None; Partitioned`
-    : `${base}; SameSite=Lax`;
+  let cookie: string;
+  if (!isHttpsRequest(req)) {
+    cookie = `${base}; SameSite=Lax`;
+  } else if (isEmbeddedIframeRequest(req)) {
+    cookie = `${base}; Secure; SameSite=None; Partitioned`;
+  } else {
+    cookie = `${base}; Secure; SameSite=Lax`;
+  }
 
   res.append('Set-Cookie', cookie);
 }
 
 export function clearPersistentSessionCookie(req: Request, res: Response) {
   const base = `${SESSION_COOKIE_NAME}=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; HttpOnly`;
-  const cookie = isHttpsRequest(req)
-    ? `${base}; Secure; SameSite=None; Partitioned`
-    : `${base}; SameSite=Lax`;
 
-  res.append('Set-Cookie', cookie);
+  if (!isHttpsRequest(req)) {
+    res.append('Set-Cookie', `${base}; SameSite=Lax`);
+    return;
+  }
+
+  if (isEmbeddedIframeRequest(req)) {
+    res.append('Set-Cookie', `${base}; Secure; SameSite=None; Partitioned`);
+  } else {
+    res.append('Set-Cookie', `${base}; Secure; SameSite=Lax`);
+  }
 }
 
 export function verifySameOriginMutation(req: Request): boolean {
@@ -218,8 +260,8 @@ export const requireAuth = async (
     req.actorName = resolved.session.label || 'Company Member';
     req.actorUid = `session:${resolved.session.id}`;
     next();
-  } catch (error) {
-    console.error('Session verification error:', error);
+  } catch (error: any) {
+    console.error('Session verification error:', error?.code || 'SESSION_VERIFY_ERROR');
     return res.status(500).json({ error: 'Unable to verify session.' });
   }
 };
