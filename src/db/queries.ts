@@ -1,5 +1,6 @@
+import crypto from 'crypto';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { db } from './index.ts';
+import { createPool, db } from './index.ts';
 import {
   activityLogs,
   appSessions,
@@ -19,6 +20,87 @@ import {
 import { buildSignedFileUrl } from '../middleware/auth.ts';
 
 const DEFAULT_LOGO_URL = '/assets/aistudio/c1a1b7c939908f430c32f54944ae2d9b_58b868bd.jpg';
+
+let schemaEnsureDone = false;
+let schemaEnsurePromise: Promise<void> | null = null;
+
+/**
+ * Ensures additive tables/columns (app_sessions, stored_file_chunks, company_settings.access_code_hash)
+ * exist on any connected PostgreSQL database without dropping, truncating, or altering existing data.
+ */
+export async function ensureAdditiveWorkspaceSchema(): Promise<void> {
+  if (schemaEnsureDone) return;
+  if (schemaEnsurePromise) return schemaEnsurePromise;
+
+  schemaEnsurePromise = (async () => {
+    const pool = createPool();
+    const check = await pool.query(`
+      SELECT
+        to_regclass('public.app_sessions') IS NOT NULL AS has_sessions,
+        to_regclass('public.stored_file_chunks') IS NOT NULL AS has_chunks,
+        EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'company_settings'
+            AND column_name = 'access_code_hash'
+        ) AS has_access_code_col
+    `);
+
+    const row = check.rows[0];
+    if (row?.has_sessions && row?.has_chunks && row?.has_access_code_col) {
+      schemaEnsureDone = true;
+      return;
+    }
+
+    // Purely additive DDL — never drops, resets, or truncates any existing tables or rows
+    if (!row?.has_sessions) {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS "app_sessions" (
+          "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+          "token_hash" text NOT NULL UNIQUE,
+          "label" text DEFAULT 'Company Workspace' NOT NULL,
+          "expires_at" timestamp NOT NULL,
+          "created_at" timestamp DEFAULT now() NOT NULL,
+          "last_seen_at" timestamp DEFAULT now() NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS "app_sessions_expires_at_idx" ON "app_sessions" ("expires_at");
+      `);
+    }
+
+    if (!row?.has_chunks) {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS "stored_file_chunks" (
+          "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+          "file_id" uuid NOT NULL REFERENCES "public"."stored_files"("id") ON DELETE cascade,
+          "chunk_index" integer NOT NULL,
+          "size_bytes" integer NOT NULL,
+          "data" bytea NOT NULL,
+          "created_at" timestamp DEFAULT now() NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS "stored_file_chunks_file_idx" ON "stored_file_chunks" ("file_id", "chunk_index");
+      `);
+    }
+
+    if (!row?.has_access_code_col) {
+      await pool.query(`
+        ALTER TABLE "company_settings" ADD COLUMN IF NOT EXISTS "access_code_hash" text;
+      `);
+    }
+
+    schemaEnsureDone = true;
+  })()
+    .catch((err: any) => {
+      schemaEnsurePromise = null;
+      console.error(
+        'ensureAdditiveWorkspaceSchema failed:',
+        err?.code,
+        err?.message
+      );
+      throw err;
+    });
+
+  return schemaEnsurePromise;
+}
 
 function serializeEmployee(row: typeof employees.$inferSelect) {
   return {
@@ -97,6 +179,7 @@ export async function logActivity(params: {
 
 export async function getCompanySettings() {
   try {
+    await ensureAdditiveWorkspaceSchema();
     const existing = await db
       .select()
       .from(companySettings)
@@ -266,6 +349,7 @@ export async function createChunkedFilePlaceholder(params: {
   uploadedByUid?: string | null;
 }) {
   try {
+    await ensureAdditiveWorkspaceSchema();
     const [row] = await db
       .insert(storedFiles)
       .values({
@@ -415,6 +499,7 @@ export async function deleteIncompleteStoredFile(fileId: string) {
 
 export async function getStoredFileMeta(fileId: string) {
   try {
+    await ensureAdditiveWorkspaceSchema();
     const [row] = await db
       .select({
         id: storedFiles.id,
@@ -557,6 +642,7 @@ async function safeDeleteStoredFile(fileId: string) {
 // ============================================================================
 
 export async function getCompanyAccessConfig() {
+  await ensureAdditiveWorkspaceSchema();
   await getCompanySettings();
   const [row] = await db
     .select({
@@ -574,6 +660,7 @@ export async function getCompanyAccessConfig() {
 }
 
 export async function claimCompanyAccessCodeHash(hash: string): Promise<boolean> {
+  await ensureAdditiveWorkspaceSchema();
   await getCompanySettings();
   const updated = await db
     .update(companySettings)
@@ -596,24 +683,48 @@ export async function createAppSession(params: {
   label?: string;
   expiresAt: Date;
 }) {
-  // Clean up expired sessions opportunistically without blocking if cleanup fails
-  db.delete(appSessions)
-    .where(lt(appSessions.expiresAt, new Date()))
-    .catch(() => {});
+  await ensureAdditiveWorkspaceSchema();
+  const now = new Date();
+  try {
+    const [created] = await db
+      .insert(appSessions)
+      .values({
+        id: crypto.randomUUID(),
+        tokenHash: params.tokenHash,
+        label: params.label || 'Company Workspace',
+        expiresAt: params.expiresAt,
+        createdAt: now,
+        lastSeenAt: now,
+      })
+      .returning();
 
-  const [created] = await db
-    .insert(appSessions)
-    .values({
-      tokenHash: params.tokenHash,
-      label: params.label || 'Company Workspace',
-      expiresAt: params.expiresAt,
-      lastSeenAt: new Date(),
-    })
-    .returning();
-  return created;
+    // Clean up expired sessions safely after insert
+    try {
+      await db.delete(appSessions).where(lt(appSessions.expiresAt, now));
+    } catch {
+      // Non-fatal cleanup
+    }
+
+    return created;
+  } catch (error: any) {
+    const cause = error?.cause || error;
+    console.error(
+      'Database insert failed in createAppSession:',
+      cause?.code,
+      cause?.message,
+      cause?.detail
+    );
+    throw new Error(
+      cause?.message
+        ? `Unable to create session (${cause.code || 'DB_ERROR'}): ${cause.message}`
+        : 'Unable to create session.',
+      { cause: error }
+    );
+  }
 }
 
 export async function getValidAppSession(tokenHash: string) {
+  await ensureAdditiveWorkspaceSchema();
   const now = new Date();
   const [row] = await db
     .select()
@@ -640,6 +751,7 @@ export async function getValidAppSession(tokenHash: string) {
 }
 
 export async function deleteAppSessionByTokenHash(tokenHash: string) {
+  await ensureAdditiveWorkspaceSchema();
   await db.delete(appSessions).where(eq(appSessions.tokenHash, tokenHash));
 }
 
