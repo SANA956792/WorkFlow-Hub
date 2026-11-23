@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 
 const SESSION_COOKIE = 'workflow_session';
 const SESSION_DURATION_SECONDS = 8 * 60 * 60;
@@ -33,7 +33,9 @@ function readCookie(req: Request, name: string): string | undefined {
   if (!raw) return undefined;
   for (const part of raw.split(';')) {
     const [key, ...value] = part.trim().split('=');
-    if (key === name) return decodeURIComponent(value.join('='));
+    if (key === name) {
+      try { return decodeURIComponent(value.join('=')); } catch { return undefined; }
+    }
   }
   return undefined;
 }
@@ -63,29 +65,26 @@ export function createSessionToken(now = Math.floor(Date.now() / 1000)): string 
   return `${payload}.${sign(payload)}`;
 }
 
-function verifySessionToken(token: string | undefined): boolean {
+export function validateSessionToken(token: string | undefined, now = Math.floor(Date.now() / 1000)): boolean {
   if (!token) return false;
   const [issuedAtRaw, expiresRaw, signature, ...rest] = token.split('.');
   if (rest.length || !issuedAtRaw || !expiresRaw || !signature) return false;
   const issuedAt = Number(issuedAtRaw);
   const expires = Number(expiresRaw);
-  const now = Math.floor(Date.now() / 1000);
   if (!Number.isSafeInteger(issuedAt) || !Number.isSafeInteger(expires) || expires <= now || expires - issuedAt !== SESSION_DURATION_SECONDS || issuedAt > now + 60) return false;
   try { return safeEqual(sign(`${issuedAt}.${expires}`), signature); } catch { return false; }
 }
 
 export function signFileAccessToken(fileId: string): string {
   const expires = Math.floor(Date.now() / 1000) + FILE_URL_DURATION_SECONDS;
-  const payload = `${fileId}.${expires}`;
-  return `${expires}.${sign(payload)}`;
+  return `${expires}.${sign(`${fileId}.${expires}`)}`;
 }
 
-export function verifyFileAccessToken(fileId: string, token: string | undefined): boolean {
+export function verifyFileAccessToken(fileId: string, token: string | undefined, now = Math.floor(Date.now() / 1000)): boolean {
   if (!token || typeof token !== 'string') return false;
   const [expiresRaw, signature, ...rest] = token.split('.');
   if (rest.length || !expiresRaw || !signature) return false;
   const expires = Number(expiresRaw);
-  const now = Math.floor(Date.now() / 1000);
   if (!Number.isSafeInteger(expires) || expires <= now || expires > now + FILE_URL_DURATION_SECONDS) return false;
   try { return safeEqual(sign(`${fileId}.${expires}`), signature); } catch { return false; }
 }
@@ -102,8 +101,14 @@ export interface AuthRequest extends Request {
 
 /** Validate the shared company code and issue an HttpOnly signed session cookie. */
 export const requireAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
+  const fetchSite = req.get('sec-fetch-site');
+  const origin = req.get('origin');
+  if (fetchSite === 'cross-site' || (origin && origin !== `${req.protocol}://${req.get('host')}`)) {
+    return res.status(403).json({ error: 'Cross-site workspace requests are not allowed.' });
+  }
+
   const session = readCookie(req, SESSION_COOKIE);
-  if (verifySessionToken(session)) {
+  if (validateSessionToken(session)) {
     req.user = { uid: 'company-access' };
     req.actorName = 'Team Member';
     const ip = req.socket.remoteAddress || 'unknown';
@@ -120,8 +125,11 @@ export const requireAuth = (req: AuthRequest, res: Response, next: NextFunction)
       return res.status(429).json({ error: 'Too many access code attempts. Try again later.' });
     }
     const configuredCode = process.env.COMPANY_ACCESS_CODE;
-    if (!configuredCode || configuredCode.length < 12 || !getSecret()) {
+    if (!configuredCode || configuredCode.length < 12 || configuredCode.length > 256 || !getSecret()) {
       return res.status(503).json({ error: 'Company access is not configured on the server.' });
+    }
+    if (suppliedCode.length > 256) {
+      return res.status(401).json({ error: 'The company access code is incorrect.' });
     }
     const suppliedHash = crypto.createHash('sha256').update(suppliedCode).digest('hex');
     const configuredHash = crypto.createHash('sha256').update(configuredCode).digest('hex');
@@ -137,8 +145,3 @@ export const requireAuth = (req: AuthRequest, res: Response, next: NextFunction)
 
   return res.status(401).json({ error: 'Enter the company access code to continue.' });
 };
-
-export function clearSessionCookie(res: Response): void {
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
-}
