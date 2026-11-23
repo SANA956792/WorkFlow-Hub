@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSessionToken, requireAuth, validateSessionToken, signFileAccessToken, verifyFileAccessToken } from './auth.ts';
@@ -6,16 +7,12 @@ process.env.SESSION_SECRET = 'test-secret-that-is-long-enough-for-session-signin
 process.env.COMPANY_ACCESS_CODE = 'test-company-access-code-123';
 process.env.NODE_ENV = 'test';
 
-function mockRequest(options: { code?: string; cookie?: string; ip?: string } = {}) {
+function mockRequest(options: { code?: string; cookie?: string; ip?: string; origin?: string } = {}) {
   const headers: Record<string, string> = {};
   if (options.cookie) headers.cookie = options.cookie;
   if (options.code !== undefined) headers['x-company-access-code'] = options.code;
-  return {
-    headers,
-    socket: { remoteAddress: options.ip || 'test-ip' },
-    protocol: 'http',
-    get(name: string) { return headers[name.toLowerCase()]; },
-  } as any;
+  if (options.origin) headers.origin = options.origin;
+  return { headers, socket: { remoteAddress: options.ip || `test-${crypto.randomUUID()}` }, protocol: 'http', get(name: string) { return headers[name.toLowerCase()]; } } as any;
 }
 
 function mockResponse() {
@@ -35,8 +32,8 @@ test('signed sessions expire and reject tampering', () => {
   assert.equal(validateSessionToken(`${token}x`, 1001), false);
 });
 
-test('company code grants a signed HttpOnly session cookie', () => {
-  const req = mockRequest({ code: process.env.COMPANY_ACCESS_CODE, ip: 'success-case' });
+test('company code grants signed HttpOnly SameSite session', () => {
+  const req = mockRequest({ code: process.env.COMPANY_ACCESS_CODE });
   const res = mockResponse();
   let advanced = false;
   requireAuth(req, res, (() => { advanced = true; }) as any);
@@ -48,13 +45,24 @@ test('company code grants a signed HttpOnly session cookie', () => {
 });
 
 test('incorrect code is rejected without creating a session', () => {
-  const req = mockRequest({ code: 'wrong-code', ip: 'failure-case' });
+  const req = mockRequest({ code: 'wrong-code' });
   const res = mockResponse();
   let advanced = false;
   requireAuth(req, res, (() => { advanced = true; }) as any);
   assert.equal(advanced, false);
   assert.equal(res.result.status, 401);
   assert.equal(res.result.cookie, undefined);
+});
+
+test('cross-origin API access is rejected', () => {
+  const req = mockRequest({ code: process.env.COMPANY_ACCESS_CODE, origin: 'https://attacker.example' });
+  req.headers.host = 'app.example';
+  req.get = (name: string) => name.toLowerCase() === 'host' ? req.headers.host : req.headers[name.toLowerCase()];
+  const res = mockResponse();
+  let advanced = false;
+  requireAuth(req, res, (() => { advanced = true; }) as any);
+  assert.equal(advanced, false);
+  assert.equal(res.result.status, 403);
 });
 
 test('signed file URL tokens are file-specific and expire', () => {

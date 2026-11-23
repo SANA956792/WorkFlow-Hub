@@ -3,7 +3,6 @@ import { LockKeyhole } from 'lucide-react';
 import { CompanySettings } from '../types';
 import { settingsService } from '../services/settingsService';
 import { apiRequest } from '../services/apiClient';
-import { getLocalTodayISO } from '../utils/dates';
 
 export function AccessGate({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<'checking' | 'locked' | 'unlocked'>('checking');
@@ -15,7 +14,7 @@ export function AccessGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let active = true;
     void settingsService.getSettings().then((value) => { if (active) setSettings(value); }).catch(() => undefined);
-    void apiRequest<unknown>(`/api/dashboard?today=${encodeURIComponent(getLocalTodayISO())}`)
+    void apiRequest<unknown>('/api/access', { method: 'POST' })
       .then(() => { if (active) setStatus('unlocked'); })
       .catch(() => { if (active) setStatus('locked'); });
     return () => { active = false; };
@@ -26,7 +25,8 @@ export function AccessGate({ children }: { children: React.ReactNode }) {
     setError('');
     setSubmitting(true);
     try {
-      await apiRequest<unknown>(`/api/dashboard?today=${encodeURIComponent(getLocalTodayISO())}`, {
+      await apiRequest<unknown>('/api/access', {
+        method: 'POST',
         headers: { 'X-Company-Access-Code': code },
       });
       setCode('');

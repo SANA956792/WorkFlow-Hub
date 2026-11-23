@@ -8,6 +8,6 @@ Set `NODE_ENV=production` and serve over HTTPS so the session cookie is Secure. 
 
 Keep the existing PostgreSQL connection variables (`SQL_HOST`, `SQL_USER`, `SQL_PASSWORD`, `SQL_DB_NAME`) on the server only. This implementation requires no schema migration and does not change or delete database records or uploaded files.
 
-Company name/logo settings are read by the application to render the code screen, and `/api/health` is a public status-only endpoint. Workspace data, write operations, and uploads remain behind the access-code session. File URLs are time-limited HMAC-signed capabilities; treat them as sensitive. Firebase Admin remains referenced in the existing file-download bearer-token fallback; it has not been removed because legacy Firebase-token downloads may still rely on it.
+Company name/logo settings are read by the application to render the code screen, and `/api/health` is a public status-only endpoint. Workspace data, write operations, and uploads remain behind the access-code session. File URLs are time-limited HMAC-signed capabilities; treat them as sensitive. The legacy Firebase Admin bearer-token file-download fallback is retained for compatibility; it only verifies a signed Firebase ID token and does not provide a login UI.
 
 Run `bun run build`, `bun run lint`, and `bun run test` before deployment. Ensure your deployment injects the required secrets and database variables; never commit production values.

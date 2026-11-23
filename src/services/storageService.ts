@@ -1,4 +1,5 @@
 import { ApiError } from './apiClient';
+import { FileAttachment } from '../types';
 
 export type StorageBucket = 'employee-images' | 'task-attachments' | 'poster-images' | 'reel-videos' | 'company-assets';
 
@@ -6,6 +7,7 @@ export async function uploadFileToStorage(bucket: StorageBucket, file: File, onP
   return new Promise<FileAttachment>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/upload');
+    xhr.withCredentials = true;
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && onProgress) onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
     };
@@ -27,5 +29,3 @@ export async function uploadFileToStorage(bucket: StorageBucket, file: File, onP
     xhr.send(formData);
   });
 }
-
-import { FileAttachment } from '../types';
