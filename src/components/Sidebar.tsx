@@ -4,7 +4,6 @@ import {
   CheckSquare,
   Image as ImageIcon,
   LayoutDashboard,
-  LogOut,
   Upload,
   Users,
   Video,
@@ -17,25 +16,12 @@ interface SidebarProps {
   onSelectSection: (section: NavSection) => void;
   settings: CompanySettings | null;
   onUploadLogo: (file: File) => Promise<void>;
-  counts: {
-    employees: number;
-    tasks: number;
-    posters: number;
-    reels: number;
-  };
-  userEmail: string | null;
-  userName: string | null;
-  onSignOut: () => void;
+  counts: { employees: number; tasks: number; posters: number; reels: number };
   mobileOpen: boolean;
   onCloseMobile: () => void;
 }
 
-const NAV_ITEMS: {
-  id: NavSection;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  color: string;
-}[] = [
+const NAV_ITEMS: { id: NavSection; label: string; icon: React.ComponentType<{ className?: string }>; color: string }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, color: '#4776E6' },
   { id: 'employees', label: 'Employees', icon: Users, color: '#4776E6' },
   { id: 'tasks', label: 'Tasks', icon: CheckSquare, color: '#8757D5' },
@@ -44,31 +30,16 @@ const NAV_ITEMS: {
   { id: 'calendar', label: 'Calendar', icon: CalendarIcon, color: '#16A6C1' },
 ];
 
-export function Sidebar({
-  activeSection,
-  onSelectSection,
-  settings,
-  onUploadLogo,
-  counts,
-  userEmail,
-  userName,
-  onSignOut,
-  mobileOpen,
-  onCloseMobile,
-}: SidebarProps) {
+export function Sidebar({ activeSection, onSelectSection, settings, onUploadLogo, counts, mobileOpen, onCloseMobile }: SidebarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
 
-  const handleLogoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
+  const handleLogoFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
     if (!file) return;
     setUploadingLogo(true);
-    try {
-      await onUploadLogo(file);
-    } finally {
-      setUploadingLogo(false);
-    }
+    try { await onUploadLogo(file); } finally { setUploadingLogo(false); }
   };
 
   const getBadgeCount = (id: NavSection): number | null => {
@@ -80,132 +51,39 @@ export function Sidebar({
   };
 
   const sidebarContent = (
-    <div className="flex h-full flex-col bg-white border-r border-slate-200/90">
-      {/* Company Logo Header */}
+    <div className="flex h-full flex-col border-r border-slate-200/90 bg-white">
       <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
         <div className="flex min-w-0 items-center gap-3">
           <div className="relative flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-white p-1">
-            {settings?.logoUrl ? (
-              <img
-                src={settings.logoUrl}
-                alt="Company Logo"
-                referrerPolicy="no-referrer"
-                className="h-full w-full object-contain"
-              />
-            ) : (
-              <span className="text-sm font-bold text-[#4776E6]">WO</span>
-            )}
+            {settings?.logoUrl ? <img src={settings.logoUrl} alt="Company Logo" referrerPolicy="no-referrer" className="h-full w-full object-contain" /> : <span className="text-sm font-bold text-[#4776E6]">WO</span>}
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-extrabold tracking-tight text-slate-900">
-              {settings?.companyName || 'WORK ORGANIZER'}
-            </div>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadingLogo}
-              className="mt-0.5 inline-flex items-center gap-1 text-xs font-medium text-[#4776E6] hover:underline disabled:opacity-50"
-            >
-              <Upload className="h-3 w-3" />
-              <span>{uploadingLogo ? 'Uploading...' : 'Change logo'}</span>
+            <div className="truncate text-sm font-extrabold tracking-tight text-slate-900">{settings?.companyName || 'WORK ORGANIZER'}</div>
+            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadingLogo} className="mt-0.5 inline-flex items-center gap-1 text-xs font-medium text-[#4776E6] hover:underline disabled:opacity-50">
+              <Upload className="h-3 w-3" /><span>{uploadingLogo ? 'Uploading...' : 'Change logo'}</span>
             </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
-              className="hidden"
-              onChange={handleLogoFileChange}
-            />
+            <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" className="hidden" onChange={handleLogoFileChange} />
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onCloseMobile}
-          className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 lg:hidden"
-          aria-label="Close navigation"
-        >
-          <X className="h-5 w-5" />
-        </button>
+        <button type="button" onClick={onCloseMobile} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 lg:hidden" aria-label="Close navigation"><X className="h-5 w-5" /></button>
       </div>
-
-      {/* Main Navigation - strictly 6 items */}
       <nav className="flex-1 space-y-1.5 overflow-y-auto px-3.5 py-5" aria-label="Main navigation">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const active = activeSection === item.id;
           const badge = getBadgeCount(item.id);
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                onSelectSection(item.id);
-                onCloseMobile();
-              }}
-              style={active ? { backgroundColor: item.color } : undefined}
-              className={`flex w-full items-center justify-between gap-3 rounded-xl px-3.5 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
-                active
-                  ? 'text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'
-              }`}
-            >
-              <span className="flex items-center gap-3">
-                <Icon className={`h-4.5 w-4.5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} />
-                <span>{item.label}</span>
-              </span>
-              {badge !== null && badge > 0 && (
-                <span
-                  className={`tabular-nums rounded-lg px-2 py-0.5 text-xs font-bold ${
-                    active
-                      ? 'bg-white/20 text-white'
-                      : 'bg-slate-100 text-slate-700'
-                  }`}
-                >
-                  {badge}
-                </span>
-              )}
-            </button>
-          );
+          return <button key={item.id} type="button" onClick={() => { onSelectSection(item.id); onCloseMobile(); }} style={active ? { backgroundColor: item.color } : undefined}
+            className={`flex w-full items-center justify-between gap-3 whitespace-nowrap rounded-xl px-3.5 py-2.5 text-sm font-semibold transition-colors ${active ? 'text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`}>
+            <span className="flex items-center gap-3"><Icon className={`h-4.5 w-4.5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} /><span>{item.label}</span></span>
+            {badge !== null && badge > 0 && <span className={`rounded-lg px-2 py-0.5 text-xs font-bold tabular-nums ${active ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-700'}`}>{badge}</span>}
+          </button>;
         })}
       </nav>
-
-      {/* Signed-in user footer */}
-      <div className="border-t border-slate-100 p-4">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-slate-900">
-              {userName || 'Team Member'}
-            </div>
-            <div className="truncate text-xs text-slate-500">{userEmail}</div>
-          </div>
-          <button
-            type="button"
-            onClick={onSignOut}
-            title="Sign out"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
-          >
-            <LogOut className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
     </div>
   );
 
-  return (
-    <>
-      {/* Desktop sidebar */}
-      <aside className="hidden w-64 shrink-0 lg:block">{sidebarContent}</aside>
-
-      {/* Mobile slide-over sidebar */}
-      {mobileOpen && (
-        <div className="fixed inset-0 z-50 flex lg:hidden">
-          <div
-            className="fixed inset-0 bg-slate-900/40"
-            onClick={onCloseMobile}
-          />
-          <aside className="relative z-10 w-68 max-w-[85vw]">{sidebarContent}</aside>
-        </div>
-      )}
-    </>
-  );
+  return <>
+    <aside className="hidden w-64 shrink-0 lg:block">{sidebarContent}</aside>
+    {mobileOpen && <div className="fixed inset-0 z-50 flex lg:hidden"><div className="fixed inset-0 bg-slate-900/40" onClick={onCloseMobile} /><aside className="relative z-10 w-68 max-w-[85vw]">{sidebarContent}</aside></div>}
+  </>;
 }

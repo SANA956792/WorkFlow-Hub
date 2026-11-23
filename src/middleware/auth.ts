@@ -1,14 +1,10 @@
 import crypto from 'crypto';
+import net from 'net';
 import { Request, Response, NextFunction } from 'express';
-import { DecodedIdToken } from 'firebase-admin/auth';
-import { adminAuth } from '../lib/firebase-admin.ts';
-import { db } from '../db/index.ts';
-import { users } from '../db/schema.ts';
 
-const FILE_TOKEN_SECRET =
-  process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16
-    ? process.env.SESSION_SECRET
-    : crypto.randomBytes(32).toString('hex');
+const FILE_TOKEN_SECRET = process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16
+  ? process.env.SESSION_SECRET
+  : crypto.randomBytes(32).toString('hex');
 
 export function signFileAccessToken(fileId: string): string {
   const hmac = crypto.createHmac('sha256', FILE_TOKEN_SECRET);
@@ -21,69 +17,36 @@ export function verifyFileAccessToken(fileId: string, token: string | undefined)
   const expected = signFileAccessToken(fileId);
   const expectedBuf = Buffer.from(expected, 'utf8');
   const providedBuf = Buffer.from(token, 'utf8');
-  if (expectedBuf.length !== providedBuf.length) return false;
-  return crypto.timingSafeEqual(expectedBuf, providedBuf);
+  return expectedBuf.length === providedBuf.length && crypto.timingSafeEqual(expectedBuf, providedBuf);
 }
 
 export function buildSignedFileUrl(fileId: string | null | undefined): string | null {
   if (!fileId) return null;
-  const token = signFileAccessToken(fileId);
-  return `/api/files/${fileId}?access=${token}`;
+  return `/api/files/${fileId}?access=${signFileAccessToken(fileId)}`;
 }
 
 export interface AuthRequest extends Request {
-  user?: DecodedIdToken;
+  user?: { uid: string };
   actorName?: string;
 }
 
-async function syncUser(decoded: DecodedIdToken) {
-  const email = decoded.email || `${decoded.uid}@user.local`;
-  const displayName = decoded.name || email.split('@')[0];
-  const photoUrl = decoded.picture || null;
-
-  await db
-    .insert(users)
-    .values({
-      uid: decoded.uid,
-      email,
-      displayName,
-      photoUrl,
-      updatedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: users.uid,
-      set: {
-        email,
-        displayName,
-        photoUrl,
-        updatedAt: new Date(),
-      },
-    });
-}
-
-export const requireAuth = async (
-  req: AuthRequest,
-  res: Response,
-  next: NextFunction
-) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+/**
+ * Restrict all workspace-data routes to explicitly trusted network addresses.
+ * Set WORKFLOW_ALLOWED_IPS to a comma-separated list of exact client IPs.
+ * The default is deny-all so an unconfigured public deployment cannot expose
+ * the database through the API. Do not trust forwarded IP headers here.
+ */
+export const requireAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
+  const allowed = (process.env.WORKFLOW_ALLOWED_IPS || '').split(',').map((ip) => ip.trim()).filter(Boolean);
+  if (allowed.length === 0) {
+    return res.status(503).json({ error: 'Workspace access is not configured.' });
   }
-
-  const token = authHeader.slice('Bearer '.length).trim();
-  if (!token) {
-    return res.status(401).json({ error: 'Authentication token is empty.' });
+  const remoteAddress = req.socket.remoteAddress || '';
+  const normalizedAddress = remoteAddress.startsWith('::ffff:') ? remoteAddress.slice(7) : remoteAddress;
+  if (!allowed.some((ip) => ip === normalizedAddress || (net.isIP(ip) === 6 && ip === remoteAddress))) {
+    return res.status(403).json({ error: 'Workspace access is restricted to approved networks.' });
   }
-
-  try {
-    const decodedToken = await adminAuth.verifyIdToken(token);
-    req.user = decodedToken;
-    req.actorName = decodedToken.name || decodedToken.email || 'Team Member';
-    await syncUser(decodedToken);
-    next();
-  } catch (error) {
-    console.error('Error verifying Firebase ID token:', error);
-    return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
-  }
+  req.user = { uid: 'workspace' };
+  req.actorName = 'Team Member';
+  next();
 };
