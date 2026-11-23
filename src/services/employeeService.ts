@@ -1,0 +1,36 @@
+import { Employee, EmployeeDetail } from '../types';
+import { getLocalTodayISO } from '../utils/dates';
+import { apiRequest } from './apiClient';
+
+export interface EmployeeInput {
+  employeeCode?: string;
+  fullName: string;
+  profileImageFileId?: string | null;
+  department: string;
+  designation: string;
+  phone?: string | null;
+  joiningDate?: string | null;
+  isActive?: boolean;
+}
+
+export const employeeService = {
+  list: () => apiRequest<Employee[]>('/api/employees'),
+  getDetail: (id: string) =>
+    apiRequest<EmployeeDetail>(
+      `/api/employees/${id}?today=${encodeURIComponent(getLocalTodayISO())}`
+    ),
+  create: (input: EmployeeInput) =>
+    apiRequest<Employee>('/api/employees', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  update: (id: string, input: Partial<EmployeeInput>) =>
+    apiRequest<Employee>(`/api/employees/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  remove: (id: string) =>
+    apiRequest<{ deleted: boolean }>(`/api/employees/${id}`, {
+      method: 'DELETE',
+    }),
+};

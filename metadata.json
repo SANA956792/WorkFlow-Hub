@@ -1,0 +1,6 @@
+{
+  "name": "WORK ORGANIZER",
+  "description": "Complete company management application for employees, tasks, posters, reels, and scheduling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
