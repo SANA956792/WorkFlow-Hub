@@ -3,6 +3,7 @@
   "appId": "1:900695452699:web:bee74f3c766e7dbdf0dcbe",
   "apiKey": "AIzaSyAVOHIafXS0Wdrj36cWxJzeimoN01kyPDE",
   "authDomain": "warm-setup-kbpf3.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-workorganizer-bc254131-1593-4644-9d0b-80db631c6ef0",
   "storageBucket": "warm-setup-kbpf3.firebasestorage.app",
   "messagingSenderId": "900695452699",
   "measurementId": "",

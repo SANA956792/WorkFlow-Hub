@@ -1,5 +1,3 @@
-import { auth } from '../lib/firebase';
-
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -9,27 +7,25 @@ export class ApiError extends Error {
   }
 }
 
-export async function getAuthToken(): Promise<string> {
-  const user = auth.currentUser;
-  if (!user) {
-    throw new ApiError('Please sign in to continue.', 401);
-  }
-  return await user.getIdToken();
-}
+export const UNAUTHORIZED_EVENT = 'wo:unauthorized';
 
 export async function apiRequest<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const token = await getAuthToken();
   const headers = new Headers(options.headers || {});
-  headers.set('Authorization', `Bearer ${token}`);
-  if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
+  headers.set('X-Requested-With', 'XMLHttpRequest');
+  if (
+    options.body &&
+    !(options.body instanceof FormData) &&
+    !headers.has('Content-Type')
+  ) {
     headers.set('Content-Type', 'application/json');
   }
 
   const response = await fetch(path, {
     ...options,
+    credentials: 'same-origin',
     headers,
   });
 
@@ -39,6 +35,9 @@ export async function apiRequest<T>(
     : null;
 
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    }
     const message =
       (data && typeof data.error === 'string' && data.error) ||
       `Request failed with status ${response.status}`;
@@ -48,8 +47,26 @@ export async function apiRequest<T>(
   return data as T;
 }
 
-export async function publicRequest<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+export async function publicRequest<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const headers = new Headers(options.headers || {});
+  headers.set('X-Requested-With', 'XMLHttpRequest');
+  if (
+    options.body &&
+    !(options.body instanceof FormData) &&
+    !headers.has('Content-Type')
+  ) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const response = await fetch(path, {
+    ...options,
+    credentials: 'same-origin',
+    headers,
+  });
+
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     throw new ApiError(

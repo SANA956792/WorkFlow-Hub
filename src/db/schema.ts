@@ -35,8 +35,22 @@ export const companySettings = pgTable('company_settings', {
   companyName: text('company_name').notNull().default('WORK ORGANIZER'),
   logoFileId: uuid('logo_file_id'),
   logoUrl: text('logo_url').notNull().default('/assets/aistudio/c1a1b7c939908f430c32f54944ae2d9b_58b868bd.jpg'),
+  accessCodeHash: text('access_code_hash'),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+export const appSessions = pgTable(
+  'app_sessions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tokenHash: text('token_hash').notNull().unique(),
+    label: text('label').notNull().default('Company Workspace'),
+    expiresAt: timestamp('expires_at').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+  },
+  (table) => [index('app_sessions_expires_at_idx').on(table.expiresAt)]
+);
 
 export const storedFiles = pgTable(
   'stored_files',
@@ -51,6 +65,23 @@ export const storedFiles = pgTable(
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (table) => [index('stored_files_bucket_idx').on(table.bucket)]
+);
+
+export const storedFileChunks = pgTable(
+  'stored_file_chunks',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    fileId: uuid('file_id')
+      .notNull()
+      .references(() => storedFiles.id, { onDelete: 'cascade' }),
+    chunkIndex: integer('chunk_index').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    data: bytea('data').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('stored_file_chunks_file_idx').on(table.fileId, table.chunkIndex),
+  ]
 );
 
 export const employees = pgTable(

@@ -1,13 +1,15 @@
-import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   activityLogs,
+  appSessions,
   companySettings,
   employees,
   posterAssignments,
   posters,
   reelAssignments,
   reels,
+  storedFileChunks,
   storedFiles,
   StoredAttachmentRef,
   taskAssignments,
@@ -256,12 +258,389 @@ export async function getStoredFileById(fileId: string) {
   }
 }
 
+export async function createChunkedFilePlaceholder(params: {
+  bucket: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedByUid?: string | null;
+}) {
+  try {
+    const [row] = await db
+      .insert(storedFiles)
+      .values({
+        bucket: params.bucket,
+        originalName: params.originalName,
+        mimeType: params.mimeType,
+        sizeBytes: params.sizeBytes,
+        data: Buffer.alloc(0),
+        uploadedByUid: params.uploadedByUid ?? null,
+      })
+      .returning({
+        id: storedFiles.id,
+        originalName: storedFiles.originalName,
+        mimeType: storedFiles.mimeType,
+        sizeBytes: storedFiles.sizeBytes,
+      });
+
+    return {
+      fileId: row.id,
+      fileName: row.originalName,
+      mimeType: row.mimeType,
+      sizeBytes: row.sizeBytes,
+    };
+  } catch (error) {
+    console.error('Database write failed in createChunkedFilePlaceholder:', error);
+    throw new Error('Unable to initialize file upload.', { cause: error });
+  }
+}
+
+export async function upsertStoredFileChunk(params: {
+  fileId: string;
+  chunkIndex: number;
+  data: Buffer;
+}) {
+  try {
+    const [fileRow] = await db
+      .select({ id: storedFiles.id })
+      .from(storedFiles)
+      .where(eq(storedFiles.id, params.fileId))
+      .limit(1);
+    if (!fileRow) {
+      throw new Error('Upload session file not found.');
+    }
+
+    await db
+      .insert(storedFileChunks)
+      .values({
+        fileId: params.fileId,
+        chunkIndex: params.chunkIndex,
+        sizeBytes: params.data.length,
+        data: params.data,
+      })
+      .onConflictDoUpdate({
+        target: [storedFileChunks.fileId, storedFileChunks.chunkIndex],
+        set: {
+          sizeBytes: params.data.length,
+          data: params.data,
+        },
+      });
+  } catch (error) {
+    console.error('Database write failed in upsertStoredFileChunk:', error);
+    throw error instanceof Error
+      ? error
+      : new Error('Unable to save upload chunk.');
+  }
+}
+
+export async function finalizeChunkedFile(params: {
+  fileId: string;
+  totalChunks: number;
+}) {
+  try {
+    const [fileRow] = await db
+      .select({
+        id: storedFiles.id,
+        originalName: storedFiles.originalName,
+        mimeType: storedFiles.mimeType,
+        sizeBytes: storedFiles.sizeBytes,
+      })
+      .from(storedFiles)
+      .where(eq(storedFiles.id, params.fileId))
+      .limit(1);
+
+    if (!fileRow) {
+      throw new Error('Uploaded file record not found.');
+    }
+
+    const chunksMeta = await db
+      .select({
+        chunkIndex: storedFileChunks.chunkIndex,
+        sizeBytes: storedFileChunks.sizeBytes,
+      })
+      .from(storedFileChunks)
+      .where(eq(storedFileChunks.fileId, params.fileId))
+      .orderBy(asc(storedFileChunks.chunkIndex));
+
+    if (chunksMeta.length !== params.totalChunks) {
+      throw new Error(
+        `Incomplete upload: received ${chunksMeta.length} of ${params.totalChunks} parts.`
+      );
+    }
+
+    let totalBytes = 0;
+    for (let i = 0; i < chunksMeta.length; i++) {
+      if (chunksMeta[i].chunkIndex !== i) {
+        throw new Error(`Missing upload part #${i}.`);
+      }
+      totalBytes += chunksMeta[i].sizeBytes;
+    }
+
+    if (totalBytes !== fileRow.sizeBytes) {
+      await db
+        .update(storedFiles)
+        .set({ sizeBytes: totalBytes })
+        .where(eq(storedFiles.id, params.fileId));
+    }
+
+    return {
+      fileId: fileRow.id,
+      fileName: fileRow.originalName,
+      mimeType: fileRow.mimeType,
+      sizeBytes: totalBytes,
+      url: buildSignedFileUrl(fileRow.id) || `/api/files/${fileRow.id}`,
+    };
+  } catch (error) {
+    console.error('Database finalize failed in finalizeChunkedFile:', error);
+    throw error instanceof Error
+      ? error
+      : new Error('Unable to finalize uploaded file.');
+  }
+}
+
+export async function deleteIncompleteStoredFile(fileId: string) {
+  try {
+    await db
+      .delete(storedFiles)
+      .where(
+        and(
+          eq(storedFiles.id, fileId),
+          sql`octet_length(${storedFiles.data}) = 0`
+        )
+      );
+  } catch (error) {
+    console.error('Non-fatal cleanup error for incomplete file:', fileId, error);
+  }
+}
+
+export async function getStoredFileMeta(fileId: string) {
+  try {
+    const [row] = await db
+      .select({
+        id: storedFiles.id,
+        bucket: storedFiles.bucket,
+        originalName: storedFiles.originalName,
+        mimeType: storedFiles.mimeType,
+        sizeBytes: storedFiles.sizeBytes,
+        inlineLength: sql<number>`octet_length(${storedFiles.data})::int`,
+      })
+      .from(storedFiles)
+      .where(eq(storedFiles.id, fileId))
+      .limit(1);
+
+    if (!row) return null;
+
+    if (row.inlineLength > 0) {
+      return {
+        ...row,
+        totalLength: row.inlineLength,
+        isChunked: false,
+      };
+    }
+
+    const chunkSum = await db
+      .select({
+        total: sql<number>`coalesce(sum(${storedFileChunks.sizeBytes}), 0)::int`,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(storedFileChunks)
+      .where(eq(storedFileChunks.fileId, fileId));
+
+    const totalFromChunks = chunkSum[0]?.total ?? 0;
+    const chunkCount = chunkSum[0]?.count ?? 0;
+    if (chunkCount === 0 && row.sizeBytes === 0) {
+      return {
+        ...row,
+        totalLength: 0,
+        isChunked: false,
+      };
+    }
+
+    return {
+      ...row,
+      totalLength: chunkCount > 0 ? totalFromChunks : row.sizeBytes,
+      isChunked: chunkCount > 0,
+    };
+  } catch (error) {
+    console.error('Database query failed in getStoredFileMeta:', error);
+    throw new Error('Unable to read file metadata.', { cause: error });
+  }
+}
+
+export async function readStoredFileRange(
+  fileId: string,
+  start: number,
+  end: number,
+  isChunked: boolean
+): Promise<Buffer> {
+  const length = Math.max(0, end - start + 1);
+  if (length === 0) return Buffer.alloc(0);
+
+  if (!isChunked) {
+    // PostgreSQL substring(bytea from 1-based-start for length) avoids loading full blobs into Node RAM
+    const result = await db
+      .select({
+        slice: sql<Buffer>`substring(${storedFiles.data} from ${start + 1} for ${length})`,
+      })
+      .from(storedFiles)
+      .where(eq(storedFiles.id, fileId))
+      .limit(1);
+    const raw = result[0]?.slice;
+    if (!raw) return Buffer.alloc(0);
+    return Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  }
+
+  const chunkMeta = await db
+    .select({
+      chunkIndex: storedFileChunks.chunkIndex,
+      sizeBytes: storedFileChunks.sizeBytes,
+    })
+    .from(storedFileChunks)
+    .where(eq(storedFileChunks.fileId, fileId))
+    .orderBy(asc(storedFileChunks.chunkIndex));
+
+  const neededIndices: { chunkIndex: number; chunkStart: number; chunkEnd: number }[] = [];
+  let offset = 0;
+  for (const cm of chunkMeta) {
+    const chunkStart = offset;
+    const chunkEnd = offset + cm.sizeBytes - 1;
+    offset += cm.sizeBytes;
+    if (chunkEnd >= start && chunkStart <= end) {
+      neededIndices.push({ chunkIndex: cm.chunkIndex, chunkStart, chunkEnd });
+    }
+  }
+
+  if (neededIndices.length === 0) return Buffer.alloc(0);
+
+  const fetched = await db
+    .select({
+      chunkIndex: storedFileChunks.chunkIndex,
+      data: storedFileChunks.data,
+    })
+    .from(storedFileChunks)
+    .where(
+      and(
+        eq(storedFileChunks.fileId, fileId),
+        inArray(
+          storedFileChunks.chunkIndex,
+          neededIndices.map((n) => n.chunkIndex)
+        )
+      )
+    )
+    .orderBy(asc(storedFileChunks.chunkIndex));
+
+  const parts: Buffer[] = [];
+  for (const meta of neededIndices) {
+    const row = fetched.find((f) => f.chunkIndex === meta.chunkIndex);
+    if (!row) continue;
+    const buf = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data);
+    const sliceStart = Math.max(0, start - meta.chunkStart);
+    const sliceEnd = Math.min(buf.length - 1, end - meta.chunkStart);
+    if (sliceEnd >= sliceStart) {
+      parts.push(buf.subarray(sliceStart, sliceEnd + 1));
+    }
+  }
+
+  return Buffer.concat(parts);
+}
+
 async function safeDeleteStoredFile(fileId: string) {
   try {
     await db.delete(storedFiles).where(eq(storedFiles.id, fileId));
   } catch (error) {
     console.error('Non-fatal cleanup error for stored file:', fileId, error);
   }
+}
+
+// ============================================================================
+// COMPANY ACCESS CODE & PERSISTENT SESSIONS
+// ============================================================================
+
+export async function getCompanyAccessConfig() {
+  await getCompanySettings();
+  const [row] = await db
+    .select({
+      accessCodeHash: companySettings.accessCodeHash,
+      logoFileId: companySettings.logoFileId,
+    })
+    .from(companySettings)
+    .where(eq(companySettings.singletonKey, 'default'))
+    .limit(1);
+
+  return {
+    accessCodeHash: row?.accessCodeHash ?? null,
+    logoFileId: row?.logoFileId ?? null,
+  };
+}
+
+export async function claimCompanyAccessCodeHash(hash: string): Promise<boolean> {
+  await getCompanySettings();
+  const updated = await db
+    .update(companySettings)
+    .set({
+      accessCodeHash: hash,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(companySettings.singletonKey, 'default'),
+        isNull(companySettings.accessCodeHash)
+      )
+    )
+    .returning({ id: companySettings.id });
+  return updated.length > 0;
+}
+
+export async function createAppSession(params: {
+  tokenHash: string;
+  label?: string;
+  expiresAt: Date;
+}) {
+  // Clean up expired sessions opportunistically without blocking if cleanup fails
+  db.delete(appSessions)
+    .where(lt(appSessions.expiresAt, new Date()))
+    .catch(() => {});
+
+  const [created] = await db
+    .insert(appSessions)
+    .values({
+      tokenHash: params.tokenHash,
+      label: params.label || 'Company Workspace',
+      expiresAt: params.expiresAt,
+      lastSeenAt: new Date(),
+    })
+    .returning();
+  return created;
+}
+
+export async function getValidAppSession(tokenHash: string) {
+  const now = new Date();
+  const [row] = await db
+    .select()
+    .from(appSessions)
+    .where(
+      and(
+        eq(appSessions.tokenHash, tokenHash),
+        gt(appSessions.expiresAt, now)
+      )
+    )
+    .limit(1);
+
+  if (!row) return null;
+
+  // Throttle lastSeenAt updates to at most once per hour
+  if (now.getTime() - row.lastSeenAt.getTime() > 60 * 60 * 1000) {
+    db.update(appSessions)
+      .set({ lastSeenAt: now })
+      .where(eq(appSessions.id, row.id))
+      .catch(() => {});
+  }
+
+  return row;
+}
+
+export async function deleteAppSessionByTokenHash(tokenHash: string) {
+  await db.delete(appSessions).where(eq(appSessions.tokenHash, tokenHash));
 }
 
 // ============================================================================

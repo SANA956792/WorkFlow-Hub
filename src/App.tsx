@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2, Menu, RefreshCw, X } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Menu,
+  RefreshCw,
+  X,
+} from 'lucide-react';
 import { useAuth } from './context/AuthContext';
 import {
   CalendarEvent,
@@ -30,8 +39,17 @@ import { ReelsPage } from './pages/ReelsPage';
 import { CalendarPage } from './pages/CalendarPage';
 
 export default function App() {
-  const { user, loading: authLoading, authError, signInWithGoogle, signOut } =
-    useAuth();
+  const {
+    authenticated,
+    needsSetup,
+    loading: authLoading,
+    authError,
+    sessionLabel,
+    loginWithCode,
+    setupAccessCode,
+    signOut,
+    clearAuthError,
+  } = useAuth();
 
   const [activeSection, setActiveSection] = useState<NavSection>('dashboard');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -46,6 +64,12 @@ export default function App() {
 
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
+
+  // Company Access Code login form state
+  const [accessCodeInput, setAccessCodeInput] = useState('');
+  const [confirmCodeInput, setConfirmCodeInput] = useState('');
+  const [showCode, setShowCode] = useState(false);
+  const [localCodeError, setLocalCodeError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
 
   // Navigation deep-link filters/selections
@@ -109,7 +133,7 @@ export default function App() {
   }, [loadSettings]);
 
   const refreshAllData = useCallback(async () => {
-    if (!user) return;
+    if (!authenticated) return;
     setDataLoading(true);
     setDataError(null);
     try {
@@ -134,13 +158,20 @@ export default function App() {
     } finally {
       setDataLoading(false);
     }
-  }, [user, notify]);
+  }, [authenticated, notify]);
 
   useEffect(() => {
-    if (user) {
+    if (authenticated) {
       refreshAllData();
+    } else {
+      setDashboard(null);
+      setEmployees([]);
+      setTasks([]);
+      setPosters([]);
+      setReels([]);
+      setCalendarEvents([]);
     }
-  }, [user, refreshAllData]);
+  }, [authenticated, refreshAllData]);
 
   const handleUploadLogo = async (file: File) => {
     try {
@@ -177,13 +208,40 @@ export default function App() {
     setActiveSection(section);
   };
 
-  const handleSignIn = async () => {
+  const handleAccessSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (signingIn) return;
+    setLocalCodeError(null);
+    clearAuthError();
+
+    const trimmed = accessCodeInput.trim();
+    if (!trimmed) {
+      setLocalCodeError('Please enter your Company Access Code.');
+      return;
+    }
+
+    if (needsSetup) {
+      if (trimmed.length < 4) {
+        setLocalCodeError('Company Access Code must be at least 4 characters.');
+        return;
+      }
+      if (trimmed !== confirmCodeInput.trim()) {
+        setLocalCodeError('Access codes do not match.');
+        return;
+      }
+    }
+
     setSigningIn(true);
     try {
-      await signInWithGoogle();
+      if (needsSetup) {
+        await setupAccessCode(trimmed);
+      } else {
+        await loginWithCode(trimmed);
+      }
+      setAccessCodeInput('');
+      setConfirmCodeInput('');
     } catch {
-      // handled by AuthContext
+      // error displayed via authError
     } finally {
       setSigningIn(false);
     }
@@ -202,7 +260,8 @@ export default function App() {
     );
   }
 
-  if (!user) {
+  if (!authenticated) {
+    const displayError = localCodeError || authError;
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#F5F7FB] p-4">
         <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
@@ -222,27 +281,100 @@ export default function App() {
               {settings?.companyName || 'WORK ORGANIZER'}
             </h1>
             <p className="mt-2 text-sm text-slate-500">
-              Sign in with your Google account to manage employees, tasks,
-              posters, reels, and publishing schedules.
+              {needsSetup
+                ? 'Set a Company Access Code once to protect your workspace. This browser will stay signed in for 30 days.'
+                : 'Enter your Company Access Code to open the workspace.'}
             </p>
           </div>
 
-          {authError && (
+          {displayError && (
             <div className="mt-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-[#E85D65]">
-              {authError}
+              {displayError}
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleSignIn}
-            disabled={signingIn}
-            className="mt-6 flex w-full items-center justify-center gap-3 rounded-xl bg-[#4776E6] px-5 py-3 text-sm font-bold text-white shadow-xs transition-opacity hover:opacity-90 disabled:opacity-60"
-          >
-            <span>
-              {signingIn ? 'Signing in...' : 'Sign in with Google'}
-            </span>
-          </button>
+          <form onSubmit={handleAccessSubmit} className="mt-6 space-y-4">
+            <div>
+              <label
+                htmlFor="company-access-code"
+                className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-600"
+              >
+                {needsSetup ? 'Create Company Access Code' : 'Company Access Code'}
+              </label>
+              <div className="relative">
+                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-slate-400">
+                  <KeyRound className="h-4 w-4" />
+                </span>
+                <input
+                  id="company-access-code"
+                  type={showCode ? 'text' : 'password'}
+                  autoFocus
+                  autoComplete="current-password"
+                  value={accessCodeInput}
+                  onChange={(e) => {
+                    setAccessCodeInput(e.target.value);
+                    if (localCodeError) setLocalCodeError(null);
+                    if (authError) clearAuthError();
+                  }}
+                  placeholder={
+                    needsSetup
+                      ? 'Choose access code (min 4 characters)'
+                      : 'Enter Company Access Code'
+                  }
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pr-11 pl-10 text-sm font-medium text-slate-900 outline-hidden transition-colors focus:border-[#4776E6] focus:bg-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCode((v) => !v)}
+                  aria-label={showCode ? 'Hide access code' : 'Show access code'}
+                  className="absolute inset-y-0 right-0 flex items-center pr-3.5 text-slate-400 hover:text-slate-700"
+                >
+                  {showCode ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {needsSetup && (
+              <div>
+                <label
+                  htmlFor="confirm-access-code"
+                  className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-600"
+                >
+                  Confirm Company Access Code
+                </label>
+                <input
+                  id="confirm-access-code"
+                  type={showCode ? 'text' : 'password'}
+                  autoComplete="new-password"
+                  value={confirmCodeInput}
+                  onChange={(e) => {
+                    setConfirmCodeInput(e.target.value);
+                    if (localCodeError) setLocalCodeError(null);
+                  }}
+                  placeholder="Re-enter access code"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm font-medium text-slate-900 outline-hidden transition-colors focus:border-[#4776E6] focus:bg-white"
+                />
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={signingIn}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#4776E6] px-5 py-3 text-sm font-bold text-white shadow-xs transition-opacity hover:opacity-90 disabled:opacity-60"
+            >
+              <span>
+                {signingIn
+                  ? 'Verifying...'
+                  : needsSetup
+                  ? 'Save Access Code & Enter'
+                  : 'Enter Workspace'}
+              </span>
+            </button>
+          </form>
         </div>
       </div>
     );
@@ -261,8 +393,7 @@ export default function App() {
           posters: posters.length,
           reels: reels.length,
         }}
-        userEmail={user.email}
-        userName={user.displayName}
+        sessionLabel={sessionLabel}
         onSignOut={signOut}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}

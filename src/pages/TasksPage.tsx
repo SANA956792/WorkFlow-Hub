@@ -25,7 +25,10 @@ import {
   TaskStatus,
 } from '../types';
 import { taskService, TaskInput } from '../services/taskService';
-import { uploadFileToStorage } from '../services/storageService';
+import {
+  downloadStoredAttachment,
+  uploadFileToStorage,
+} from '../services/storageService';
 import { ThreeDotMenu } from '../components/ThreeDotMenu';
 import { ConfirmModal } from '../components/ConfirmModal';
 import {
@@ -1186,6 +1189,14 @@ export function TasksPage({
                               href={att.url}
                               target="_blank"
                               rel="noreferrer"
+                              onClick={(e) => {
+                                if (att.sizeBytes > 3 * 1024 * 1024) {
+                                  e.preventDefault();
+                                  downloadStoredAttachment(att).catch((err) =>
+                                    onNotify('error', err?.message || 'Download failed.')
+                                  );
+                                }
+                              }}
                               className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-[#4776E6] hover:bg-slate-50"
                             >
                               <span className="inline-flex items-center gap-2 truncate">
@@ -1357,6 +1368,14 @@ export function TasksPage({
                                   href={att.url}
                                   target="_blank"
                                   rel="noreferrer"
+                                  onClick={(e) => {
+                                    if (att.sizeBytes > 3 * 1024 * 1024) {
+                                      e.preventDefault();
+                                      downloadStoredAttachment(att).catch((err) =>
+                                        onNotify('error', err?.message || 'Download failed.')
+                                      );
+                                    }
+                                  }}
                                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-[#4776E6] hover:bg-slate-50"
                                 >
                                   <Paperclip className="h-3 w-3" />

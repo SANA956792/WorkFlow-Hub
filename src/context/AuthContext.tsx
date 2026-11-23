@@ -1,56 +1,127 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import {
-  User,
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut as firebaseSignOut,
-} from 'firebase/auth';
-import { auth, googleAuthProvider } from '../lib/firebase';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from 'react';
+import { publicRequest, UNAUTHORIZED_EVENT } from '../services/apiClient';
+
+interface SessionResponse {
+  authenticated: boolean;
+  needsSetup?: boolean;
+  label?: string;
+  expiresAt?: string;
+}
 
 interface AuthContextValue {
-  user: User | null;
+  authenticated: boolean;
+  needsSetup: boolean;
   loading: boolean;
   authError: string | null;
-  signInWithGoogle: () => Promise<void>;
+  sessionLabel: string | null;
+  loginWithCode: (accessCode: string) => Promise<void>;
+  setupAccessCode: (accessCode: string) => Promise<void>;
   signOut: () => Promise<void>;
+  clearAuthError: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [needsSetup, setNeedsSetup] = useState(false);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [sessionLabel, setSessionLabel] = useState<string | null>(null);
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      setUser(firebaseUser);
+  const checkSession = useCallback(async () => {
+    try {
+      const data = await publicRequest<SessionResponse>('/api/auth/session');
+      setAuthenticated(Boolean(data.authenticated));
+      setNeedsSetup(Boolean(data.needsSetup));
+      setSessionLabel(data.label || (data.authenticated ? 'Company Workspace' : null));
+    } catch {
+      setAuthenticated(false);
+    } finally {
       setLoading(false);
-    });
-    return () => unsubscribe();
+    }
   }, []);
 
-  const signInWithGoogle = async () => {
+  useEffect(() => {
+    checkSession();
+  }, [checkSession]);
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      setAuthenticated(false);
+      setSessionLabel(null);
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
+  }, []);
+
+  const loginWithCode = async (accessCode: string) => {
     setAuthError(null);
     try {
-      await signInWithPopup(auth, googleAuthProvider);
+      const data = await publicRequest<SessionResponse>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ accessCode }),
+      });
+      setAuthenticated(Boolean(data.authenticated));
+      setNeedsSetup(false);
+      setSessionLabel(data.label || 'Company Workspace');
     } catch (error: any) {
-      const msg =
-        error?.code === 'auth/popup-closed-by-user'
-          ? 'Sign-in window was closed before completing.'
-          : error?.message || 'Unable to sign in with Google.';
+      const msg = error?.message || 'Invalid Company Access Code.';
+      setAuthError(msg);
+      throw error;
+    }
+  };
+
+  const setupAccessCode = async (accessCode: string) => {
+    setAuthError(null);
+    try {
+      const data = await publicRequest<SessionResponse>('/api/auth/setup', {
+        method: 'POST',
+        body: JSON.stringify({ accessCode }),
+      });
+      setAuthenticated(Boolean(data.authenticated));
+      setNeedsSetup(false);
+      setSessionLabel(data.label || 'Company Workspace');
+    } catch (error: any) {
+      const msg = error?.message || 'Unable to save Company Access Code.';
       setAuthError(msg);
       throw error;
     }
   };
 
   const signOut = async () => {
-    await firebaseSignOut(auth);
+    setAuthError(null);
+    try {
+      await publicRequest('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Clear local session state even if server call fails
+    } finally {
+      setAuthenticated(false);
+      setSessionLabel(null);
+    }
   };
+
+  const clearAuthError = () => setAuthError(null);
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, authError, signInWithGoogle, signOut }}
+      value={{
+        authenticated,
+        needsSetup,
+        loading,
+        authError,
+        sessionLabel,
+        loginWithCode,
+        setupAccessCode,
+        signOut,
+        clearAuthError,
+      }}
     >
       {children}
     </AuthContext.Provider>

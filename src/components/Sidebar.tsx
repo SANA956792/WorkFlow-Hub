@@ -23,8 +23,7 @@ interface SidebarProps {
     posters: number;
     reels: number;
   };
-  userEmail: string | null;
-  userName: string | null;
+  sessionLabel: string | null;
   onSignOut: () => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
@@ -50,8 +49,7 @@ export function Sidebar({
   settings,
   onUploadLogo,
   counts,
-  userEmail,
-  userName,
+  sessionLabel,
   onSignOut,
   mobileOpen,
   onCloseMobile,
@@ -169,19 +167,22 @@ export function Sidebar({
         })}
       </nav>
 
-      {/* Signed-in user footer */}
+      {/* Active session footer */}
       <div className="border-t border-slate-100 p-4">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold text-slate-900">
-              {userName || 'Team Member'}
+              {sessionLabel || 'Company Workspace'}
             </div>
-            <div className="truncate text-xs text-slate-500">{userEmail}</div>
+            <div className="truncate text-xs text-slate-500">
+              Signed in via Access Code
+            </div>
           </div>
           <button
             type="button"
             onClick={onSignOut}
-            title="Sign out"
+            title="Log out"
+            aria-label="Log out"
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
           >
             <LogOut className="h-4 w-4" />
