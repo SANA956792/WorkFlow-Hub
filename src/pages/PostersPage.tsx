@@ -447,7 +447,7 @@ export function PostersPage({
         </div>
       </div>
 
-      {error && loaded && (
+      {error && loaded && posters.length > 0 && (
         <PageLoadError
           title="Could not refresh posters"
           message={error}
@@ -458,13 +458,13 @@ export function PostersPage({
       )}
 
       {/* Poster Cards Grid */}
-      {loading && !loaded && posters.length === 0 ? (
+      {loading && !loaded && !error && posters.length === 0 ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="h-72 animate-pulse rounded-2xl bg-slate-200" />
           ))}
         </div>
-      ) : error && !loaded && posters.length === 0 ? (
+      ) : error && posters.length === 0 ? (
         <PageLoadError
           title="Unable to load posters"
           message={error}

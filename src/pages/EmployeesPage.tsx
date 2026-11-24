@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { Employee, EmployeeDetail } from '../types';
+import { ApiError } from '../services/apiClient';
 import { employeeService, EmployeeInput } from '../services/employeeService';
 import { uploadFileToStorage } from '../services/storageService';
 import { ThreeDotMenu } from '../components/ThreeDotMenu';
@@ -79,6 +80,18 @@ export function EmployeesPage({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [employeeDetail, setEmployeeDetail] = useState<EmployeeDetail | null>(null);
   const detailReqIdRef = useRef(0);
+  const detailAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      detailReqIdRef.current += 1;
+      detailAbortRef.current?.abort();
+      detailAbortRef.current = null;
+    };
+  }, []);
 
   // Confirm delete/deactivate modal
   const [confirmTarget, setConfirmTarget] = useState<{
@@ -112,21 +125,38 @@ export function EmployeesPage({
   }, [employees, search, departmentFilter, statusFilter]);
 
   const openProfile = async (empId: string) => {
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
     const reqId = ++detailReqIdRef.current;
+
     setDetailTargetId(empId);
     setDetailOpen(true);
     setDetailLoading(true);
     setDetailError(null);
     setEmployeeDetail(null);
     try {
-      const detail = await employeeService.getDetail(empId);
-      if (reqId !== detailReqIdRef.current) return;
+      const detail = await employeeService.getDetail(empId, controller.signal);
+      if (!mountedRef.current || controller.signal.aborted || reqId !== detailReqIdRef.current) {
+        return;
+      }
       setEmployeeDetail(detail);
     } catch (err: any) {
-      if (reqId !== detailReqIdRef.current) return;
+      if (
+        !mountedRef.current ||
+        controller.signal.aborted ||
+        reqId !== detailReqIdRef.current ||
+        err?.name === 'AbortError' ||
+        (err instanceof ApiError && err.status === 401)
+      ) {
+        return;
+      }
       setDetailError(err.message || 'Unable to load employee profile.');
     } finally {
-      if (reqId === detailReqIdRef.current) {
+      if (detailAbortRef.current === controller) {
+        detailAbortRef.current = null;
+      }
+      if (mountedRef.current && reqId === detailReqIdRef.current) {
         setDetailLoading(false);
       }
     }
@@ -327,7 +357,7 @@ export function EmployeesPage({
         </div>
       </div>
 
-      {error && loaded && (
+      {error && loaded && employees.length > 0 && (
         <PageLoadError
           title="Could not refresh employees"
           message={error}
@@ -338,13 +368,13 @@ export function EmployeesPage({
       )}
 
       {/* Employee Cards Grid */}
-      {loading && !loaded && employees.length === 0 ? (
+      {loading && !loaded && !error && employees.length === 0 ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, idx) => (
             <div key={idx} className="h-44 animate-pulse rounded-2xl bg-slate-200" />
           ))}
         </div>
-      ) : error && !loaded && employees.length === 0 ? (
+      ) : error && employees.length === 0 ? (
         <PageLoadError
           title="Unable to load employees"
           message={error}

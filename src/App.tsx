@@ -39,6 +39,48 @@ import { PostersPage } from './pages/PostersPage';
 import { ReelsPage } from './pages/ReelsPage';
 import { CalendarPage } from './pages/CalendarPage';
 
+const ALL_SECTIONS: NavSection[] = [
+  'dashboard',
+  'employees',
+  'tasks',
+  'posters',
+  'reels',
+  'calendar',
+];
+
+const INITIAL_SECTION_FLAGS: Record<NavSection, boolean> = {
+  dashboard: false,
+  employees: false,
+  tasks: false,
+  posters: false,
+  reels: false,
+  calendar: false,
+};
+
+const ACTIVE_SECTION_FLAGS: Record<NavSection, boolean> = {
+  dashboard: true,
+  employees: true,
+  tasks: true,
+  posters: true,
+  reels: true,
+  calendar: true,
+};
+
+const INITIAL_SECTION_ERRORS: Record<NavSection, string | null> = {
+  dashboard: null,
+  employees: null,
+  tasks: null,
+  posters: null,
+  reels: null,
+  calendar: null,
+};
+
+function isAbortOrUnauthorized(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  if ((err as { name?: string }).name === 'AbortError') return true;
+  return err instanceof ApiError && err.status === 401;
+}
+
 export default function App() {
   const {
     authenticated,
@@ -64,16 +106,47 @@ export default function App() {
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
 
   const [dataLoading, setDataLoading] = useState(false);
-  const [retryingSection, setRetryingSection] = useState<NavSection | null>(null);
-  const [loadedSections, setLoadedSections] = useState<Record<NavSection, boolean>>({
-    dashboard: false,
-    employees: false,
-    tasks: false,
-    posters: false,
-    reels: false,
-    calendar: false,
+  const [refreshingSections, setRefreshingSections] = useState<
+    Record<NavSection, boolean>
+  >(INITIAL_SECTION_FLAGS);
+  const [retryingSections, setRetryingSections] = useState<
+    Record<NavSection, boolean>
+  >(INITIAL_SECTION_FLAGS);
+  const [loadedSections, setLoadedSections] = useState<Record<NavSection, boolean>>(
+    INITIAL_SECTION_FLAGS
+  );
+  const [pageErrors, setPageErrors] = useState<Record<NavSection, string | null>>(
+    INITIAL_SECTION_ERRORS
+  );
+
+  const authenticatedRef = useRef(authenticated);
+  authenticatedRef.current = authenticated;
+
+  const loadedSectionsRef = useRef(loadedSections);
+  loadedSectionsRef.current = loadedSections;
+
+  const countsRef = useRef({
+    employees: employees.length,
+    tasks: tasks.length,
+    posters: posters.length,
+    reels: reels.length,
   });
-  const [pageErrors, setPageErrors] = useState<Record<NavSection, string | null>>({
+  countsRef.current = {
+    employees: employees.length,
+    tasks: tasks.length,
+    posters: posters.length,
+    reels: reels.length,
+  };
+
+  const refreshRequestIdRef = useRef(0);
+  const workspaceEpochRef = useRef(0);
+  const refreshAbortRef = useRef<AbortController | null>(null);
+  const inFlightRefreshRef = useRef<Promise<void> | null>(null);
+
+  const retryingInFlightRef = useRef<Record<NavSection, boolean>>({
+    ...INITIAL_SECTION_FLAGS,
+  });
+  const retryAbortRefs = useRef<Record<NavSection, AbortController | null>>({
     dashboard: null,
     employees: null,
     tasks: null,
@@ -81,10 +154,14 @@ export default function App() {
     reels: null,
     calendar: null,
   });
-
-  const refreshRequestIdRef = useRef(0);
-  const refreshAbortRef = useRef<AbortController | null>(null);
-  const inFlightRefreshRef = useRef<Promise<void> | null>(null);
+  const retryRequestIdsRef = useRef<Record<NavSection, number>>({
+    dashboard: 0,
+    employees: 0,
+    tasks: 0,
+    posters: 0,
+    reels: 0,
+    calendar: 0,
+  });
 
   // Company Access Code login form state
   const [accessCodeInput, setAccessCodeInput] = useState('');
@@ -119,6 +196,7 @@ export default function App() {
   } | null>(null);
 
   const notify = useCallback((type: 'success' | 'error', message: string) => {
+    if (!authenticatedRef.current) return;
     setToast({ type, message });
   }, []);
 
@@ -153,32 +231,44 @@ export default function App() {
     loadSettings();
   }, [loadSettings]);
 
+  const abortAllSectionRetries = useCallback(() => {
+    for (const sec of ALL_SECTIONS) {
+      retryRequestIdsRef.current[sec] += 1;
+      retryAbortRefs.current[sec]?.abort();
+      retryAbortRefs.current[sec] = null;
+      retryingInFlightRef.current[sec] = false;
+    }
+    setRetryingSections(INITIAL_SECTION_FLAGS);
+  }, []);
+
   const refreshAllData = useCallback(
-    async (force = true) => {
-      if (!authenticated) return;
+    (force = true): Promise<void> => {
+      if (!authenticatedRef.current) return Promise.resolve();
       if (!force && inFlightRefreshRef.current) {
         return inFlightRefreshRef.current;
       }
 
       refreshAbortRef.current?.abort();
+      abortAllSectionRetries();
+
       const controller = new AbortController();
       refreshAbortRef.current = controller;
       const requestId = ++refreshRequestIdRef.current;
+      workspaceEpochRef.current += 1;
+
+      const isStale = () =>
+        !authenticatedRef.current ||
+        controller.signal.aborted ||
+        requestId !== refreshRequestIdRef.current;
 
       setDataLoading(true);
-      setPageErrors({
-        dashboard: null,
-        employees: null,
-        tasks: null,
-        posters: null,
-        reels: null,
-        calendar: null,
-      });
+      setRefreshingSections(ACTIVE_SECTION_FLAGS);
 
-      const run = (async () => {
+      let run: Promise<void> | null = null;
+      run = (async () => {
         try {
           const workspace = await dashboardService.getWorkspace(controller.signal);
-          if (requestId !== refreshRequestIdRef.current) return;
+          if (isStale()) return;
 
           setDashboard(workspace.summary);
           setEmployees(workspace.employees);
@@ -186,117 +276,113 @@ export default function App() {
           setPosters(workspace.posters);
           setReels(workspace.reels);
           setCalendarEvents(workspace.calendarEvents);
-          setLoadedSections({
-            dashboard: true,
-            employees: true,
-            tasks: true,
-            posters: true,
-            reels: true,
-            calendar: true,
-          });
-          setPageErrors({
-            dashboard: null,
-            employees: null,
-            tasks: null,
-            posters: null,
-            reels: null,
-            calendar: null,
-          });
+          setLoadedSections(ACTIVE_SECTION_FLAGS);
+          setPageErrors(INITIAL_SECTION_ERRORS);
+          setRefreshingSections(INITIAL_SECTION_FLAGS);
         } catch (err: any) {
-          if (err?.name === 'AbortError' || requestId !== refreshRequestIdRef.current) {
-            return;
-          }
-          if (err instanceof ApiError && err.status === 401) {
+          if (isStale() || isAbortOrUnauthorized(err)) {
             return;
           }
 
-          // Fallback to independent settled requests so one failing route never blocks other pages
-          const results = await Promise.allSettled([
-            dashboardService.getSummary(controller.signal),
-            employeeService.list(controller.signal),
-            taskService.list(controller.signal),
-            posterService.list(controller.signal),
-            reelService.list(controller.signal),
-            dashboardService.getCalendarEvents(controller.signal),
+          if (controller.signal.aborted) return;
+
+          let firstErrMsg: string | null = null;
+          const recordError = (section: NavSection, error: unknown, fallback: string) => {
+            if (isStale() || isAbortOrUnauthorized(error)) return;
+            const msg =
+              error instanceof Error && error.message ? error.message : fallback;
+            if (!firstErrMsg) firstErrMsg = msg;
+            setPageErrors((prev) => ({ ...prev, [section]: msg }));
+          };
+          const markSectionSettled = (section: NavSection) => {
+            if (isStale()) return;
+            setRefreshingSections((prev) =>
+              prev[section] ? { ...prev, [section]: false } : prev
+            );
+          };
+
+          // Progressive fallback to independent requests without stacked GET retries
+          await Promise.allSettled([
+            dashboardService
+              .getSummary(controller.signal, { retry: false })
+              .then((val) => {
+                if (isStale()) return;
+                setDashboard(val);
+                setLoadedSections((prev) => ({ ...prev, dashboard: true }));
+                setPageErrors((prev) => ({ ...prev, dashboard: null }));
+              })
+              .catch((e) => recordError('dashboard', e, 'Unable to load dashboard.'))
+              .finally(() => markSectionSettled('dashboard')),
+
+            employeeService
+              .list(controller.signal, { retry: false })
+              .then((val) => {
+                if (isStale()) return;
+                setEmployees(val);
+                setLoadedSections((prev) => ({ ...prev, employees: true }));
+                setPageErrors((prev) => ({ ...prev, employees: null }));
+              })
+              .catch((e) => recordError('employees', e, 'Unable to load employees.'))
+              .finally(() => markSectionSettled('employees')),
+
+            taskService
+              .list(controller.signal, { retry: false })
+              .then((val) => {
+                if (isStale()) return;
+                setTasks(val);
+                setLoadedSections((prev) => ({ ...prev, tasks: true }));
+                setPageErrors((prev) => ({ ...prev, tasks: null }));
+              })
+              .catch((e) => recordError('tasks', e, 'Unable to load tasks.'))
+              .finally(() => markSectionSettled('tasks')),
+
+            posterService
+              .list(controller.signal, { retry: false })
+              .then((val) => {
+                if (isStale()) return;
+                setPosters(val);
+                setLoadedSections((prev) => ({ ...prev, posters: true }));
+                setPageErrors((prev) => ({ ...prev, posters: null }));
+              })
+              .catch((e) => recordError('posters', e, 'Unable to load posters.'))
+              .finally(() => markSectionSettled('posters')),
+
+            reelService
+              .list(controller.signal, { retry: false })
+              .then((val) => {
+                if (isStale()) return;
+                setReels(val);
+                setLoadedSections((prev) => ({ ...prev, reels: true }));
+                setPageErrors((prev) => ({ ...prev, reels: null }));
+              })
+              .catch((e) => recordError('reels', e, 'Unable to load reels.'))
+              .finally(() => markSectionSettled('reels')),
+
+            dashboardService
+              .getCalendarEvents(controller.signal, { retry: false })
+              .then((val) => {
+                if (isStale()) return;
+                setCalendarEvents(val);
+                setLoadedSections((prev) => ({ ...prev, calendar: true }));
+                setPageErrors((prev) => ({ ...prev, calendar: null }));
+              })
+              .catch((e) => recordError('calendar', e, 'Unable to load calendar.'))
+              .finally(() => markSectionSettled('calendar')),
           ]);
 
-          if (requestId !== refreshRequestIdRef.current) return;
-
-          const [dashRes, empRes, taskRes, posterRes, reelRes, calRes] = results;
-          const nextLoaded: Partial<Record<NavSection, boolean>> = {};
-          const nextErrors: Partial<Record<NavSection, string | null>> = {};
-          let firstErrMsg: string | null = null;
-
-          if (dashRes.status === 'fulfilled') {
-            setDashboard(dashRes.value);
-            nextLoaded.dashboard = true;
-            nextErrors.dashboard = null;
-          } else if (dashRes.reason?.name !== 'AbortError') {
-            const msg = dashRes.reason?.message || 'Unable to load dashboard.';
-            nextErrors.dashboard = msg;
-            firstErrMsg = firstErrMsg || msg;
-          }
-
-          if (empRes.status === 'fulfilled') {
-            setEmployees(empRes.value);
-            nextLoaded.employees = true;
-            nextErrors.employees = null;
-          } else if (empRes.reason?.name !== 'AbortError') {
-            const msg = empRes.reason?.message || 'Unable to load employees.';
-            nextErrors.employees = msg;
-            firstErrMsg = firstErrMsg || msg;
-          }
-
-          if (taskRes.status === 'fulfilled') {
-            setTasks(taskRes.value);
-            nextLoaded.tasks = true;
-            nextErrors.tasks = null;
-          } else if (taskRes.reason?.name !== 'AbortError') {
-            const msg = taskRes.reason?.message || 'Unable to load tasks.';
-            nextErrors.tasks = msg;
-            firstErrMsg = firstErrMsg || msg;
-          }
-
-          if (posterRes.status === 'fulfilled') {
-            setPosters(posterRes.value);
-            nextLoaded.posters = true;
-            nextErrors.posters = null;
-          } else if (posterRes.reason?.name !== 'AbortError') {
-            const msg = posterRes.reason?.message || 'Unable to load posters.';
-            nextErrors.posters = msg;
-            firstErrMsg = firstErrMsg || msg;
-          }
-
-          if (reelRes.status === 'fulfilled') {
-            setReels(reelRes.value);
-            nextLoaded.reels = true;
-            nextErrors.reels = null;
-          } else if (reelRes.reason?.name !== 'AbortError') {
-            const msg = reelRes.reason?.message || 'Unable to load reels.';
-            nextErrors.reels = msg;
-            firstErrMsg = firstErrMsg || msg;
-          }
-
-          if (calRes.status === 'fulfilled') {
-            setCalendarEvents(calRes.value);
-            nextLoaded.calendar = true;
-            nextErrors.calendar = null;
-          } else if (calRes.reason?.name !== 'AbortError') {
-            const msg = calRes.reason?.message || 'Unable to load calendar.';
-            nextErrors.calendar = msg;
-            firstErrMsg = firstErrMsg || msg;
-          }
-
-          setLoadedSections((prev) => ({ ...prev, ...nextLoaded }));
-          setPageErrors((prev) => ({ ...prev, ...nextErrors }));
-
-          if (firstErrMsg) {
+          if (!isStale() && firstErrMsg) {
             notify('error', firstErrMsg);
           }
         } finally {
-          if (requestId === refreshRequestIdRef.current) {
-            setDataLoading(false);
+          if (refreshAbortRef.current === controller) {
+            refreshAbortRef.current = null;
+          }
+          if (inFlightRefreshRef.current === run) {
             inFlightRefreshRef.current = null;
+          }
+          if (requestId === refreshRequestIdRef.current && authenticatedRef.current) {
+            setDataLoading(false);
+            setRefreshingSections(INITIAL_SECTION_FLAGS);
           }
         }
       })();
@@ -304,113 +390,334 @@ export default function App() {
       inFlightRefreshRef.current = run;
       return run;
     },
-    [authenticated, notify]
+    [abortAllSectionRetries, notify]
   );
 
   const retrySection = useCallback(
     async (section: NavSection) => {
-      if (!authenticated || retryingSection === section) return;
-      setRetryingSection(section);
-      setPageErrors((prev) => ({ ...prev, [section]: null }));
+      if (!authenticatedRef.current || retryingInFlightRef.current[section]) {
+        return;
+      }
+
+      retryingInFlightRef.current[section] = true;
+      setRetryingSections((prev) => ({ ...prev, [section]: true }));
+
+      const controller = new AbortController();
+      retryAbortRefs.current[section] = controller;
+      const reqId = ++retryRequestIdsRef.current[section];
+      const startEpoch = workspaceEpochRef.current;
+
+      const isRetryStale = () =>
+        !authenticatedRef.current ||
+        controller.signal.aborted ||
+        reqId !== retryRequestIdsRef.current[section] ||
+        startEpoch !== workspaceEpochRef.current;
+
+      const syncSummary = async () => {
+        if (!loadedSectionsRef.current.dashboard || isRetryStale()) return;
+        try {
+          const sum = await dashboardService.getSummary(controller.signal, {
+            retry: false,
+          });
+          if (isRetryStale()) return;
+          setDashboard(sum);
+          setLoadedSections((prev) => ({ ...prev, dashboard: true }));
+          setPageErrors((prev) => ({ ...prev, dashboard: null }));
+        } catch (syncErr: any) {
+          if (isRetryStale() || isAbortOrUnauthorized(syncErr)) return;
+          setPageErrors((prev) => ({
+            ...prev,
+            dashboard: syncErr?.message || 'Unable to load dashboard.',
+          }));
+        }
+      };
+
+      const syncCalendar = async () => {
+        if (!loadedSectionsRef.current.calendar || isRetryStale()) return;
+        try {
+          const cal = await dashboardService.getCalendarEvents(controller.signal, {
+            retry: false,
+          });
+          if (isRetryStale()) return;
+          setCalendarEvents(cal);
+          setLoadedSections((prev) => ({ ...prev, calendar: true }));
+          setPageErrors((prev) => ({ ...prev, calendar: null }));
+        } catch (syncErr: any) {
+          if (isRetryStale() || isAbortOrUnauthorized(syncErr)) return;
+          setPageErrors((prev) => ({
+            ...prev,
+            calendar: syncErr?.message || 'Unable to load calendar.',
+          }));
+        }
+      };
+
       try {
         if (section === 'dashboard') {
-          const sum = await dashboardService.getSummary();
+          const sum = await dashboardService.getSummary(controller.signal);
+          if (isRetryStale()) return;
           setDashboard(sum);
+          setLoadedSections((prev) => ({ ...prev, dashboard: true }));
+          setPageErrors((prev) => ({ ...prev, dashboard: null }));
+
+          const driftSyncs: Promise<void>[] = [];
+          if (
+            loadedSectionsRef.current.employees &&
+            sum.kpis.totalEmployees !== countsRef.current.employees
+          ) {
+            driftSyncs.push(
+              employeeService
+                .list(controller.signal, { retry: false })
+                .then((emps) => {
+                  if (isRetryStale()) return;
+                  setEmployees(emps);
+                  setPageErrors((prev) => ({ ...prev, employees: null }));
+                })
+                .catch((syncErr: any) => {
+                  if (isRetryStale() || isAbortOrUnauthorized(syncErr)) return;
+                  setPageErrors((prev) => ({
+                    ...prev,
+                    employees: syncErr?.message || 'Unable to load employees.',
+                  }));
+                })
+            );
+          }
+          if (
+            loadedSectionsRef.current.tasks &&
+            sum.kpis.totalTasks !== countsRef.current.tasks
+          ) {
+            driftSyncs.push(
+              taskService
+                .list(controller.signal, { retry: false })
+                .then((tks) => {
+                  if (isRetryStale()) return;
+                  setTasks(tks);
+                  setPageErrors((prev) => ({ ...prev, tasks: null }));
+                })
+                .catch((syncErr: any) => {
+                  if (isRetryStale() || isAbortOrUnauthorized(syncErr)) return;
+                  setPageErrors((prev) => ({
+                    ...prev,
+                    tasks: syncErr?.message || 'Unable to load tasks.',
+                  }));
+                })
+            );
+          }
+          if (
+            loadedSectionsRef.current.posters &&
+            sum.kpis.totalPosters !== countsRef.current.posters
+          ) {
+            driftSyncs.push(
+              posterService
+                .list(controller.signal, { retry: false })
+                .then((psts) => {
+                  if (isRetryStale()) return;
+                  setPosters(psts);
+                  setPageErrors((prev) => ({ ...prev, posters: null }));
+                })
+                .catch((syncErr: any) => {
+                  if (isRetryStale() || isAbortOrUnauthorized(syncErr)) return;
+                  setPageErrors((prev) => ({
+                    ...prev,
+                    posters: syncErr?.message || 'Unable to load posters.',
+                  }));
+                })
+            );
+          }
+          if (
+            loadedSectionsRef.current.reels &&
+            sum.kpis.totalReels !== countsRef.current.reels
+          ) {
+            driftSyncs.push(
+              reelService
+                .list(controller.signal, { retry: false })
+                .then((rls) => {
+                  if (isRetryStale()) return;
+                  setReels(rls);
+                  setPageErrors((prev) => ({ ...prev, reels: null }));
+                })
+                .catch((syncErr: any) => {
+                  if (isRetryStale() || isAbortOrUnauthorized(syncErr)) return;
+                  setPageErrors((prev) => ({
+                    ...prev,
+                    reels: syncErr?.message || 'Unable to load reels.',
+                  }));
+                })
+            );
+          }
+          if (driftSyncs.length > 0) {
+            await Promise.allSettled(driftSyncs);
+          }
         } else if (section === 'employees') {
-          const emps = await employeeService.list();
+          const emps = await employeeService.list(controller.signal);
+          if (isRetryStale()) return;
           setEmployees(emps);
+          setLoadedSections((prev) => ({ ...prev, employees: true }));
+          setPageErrors((prev) => ({ ...prev, employees: null }));
+          await syncSummary();
         } else if (section === 'tasks') {
           const [tksRes, empsRes] = await Promise.allSettled([
-            taskService.list(),
-            loadedSections.employees ? Promise.resolve(null) : employeeService.list(),
+            taskService.list(controller.signal),
+            employeeService.list(controller.signal, { retry: false }),
           ]);
-          if (empsRes.status === 'fulfilled' && empsRes.value) {
+          if (isRetryStale()) return;
+
+          let empErrMsg: string | null = null;
+          if (empsRes.status === 'fulfilled') {
             setEmployees(empsRes.value);
             setLoadedSections((prev) => ({ ...prev, employees: true }));
+            setPageErrors((prev) => ({ ...prev, employees: null }));
+          } else if (!isAbortOrUnauthorized(empsRes.reason)) {
+            empErrMsg =
+              empsRes.reason?.message || 'Unable to load employees.';
+            setPageErrors((prev) => ({ ...prev, employees: empErrMsg }));
           }
+
           if (tksRes.status === 'rejected') throw tksRes.reason;
           setTasks(tksRes.value);
+          setLoadedSections((prev) => ({ ...prev, tasks: true }));
+          setPageErrors((prev) => ({ ...prev, tasks: null }));
+          if (empErrMsg) {
+            notify('error', empErrMsg);
+          }
+
+          await Promise.allSettled([syncSummary(), syncCalendar()]);
         } else if (section === 'posters') {
           const [pstsRes, empsRes] = await Promise.allSettled([
-            posterService.list(),
-            loadedSections.employees ? Promise.resolve(null) : employeeService.list(),
+            posterService.list(controller.signal),
+            employeeService.list(controller.signal, { retry: false }),
           ]);
-          if (empsRes.status === 'fulfilled' && empsRes.value) {
+          if (isRetryStale()) return;
+
+          let empErrMsg: string | null = null;
+          if (empsRes.status === 'fulfilled') {
             setEmployees(empsRes.value);
             setLoadedSections((prev) => ({ ...prev, employees: true }));
+            setPageErrors((prev) => ({ ...prev, employees: null }));
+          } else if (!isAbortOrUnauthorized(empsRes.reason)) {
+            empErrMsg =
+              empsRes.reason?.message || 'Unable to load employees.';
+            setPageErrors((prev) => ({ ...prev, employees: empErrMsg }));
           }
+
           if (pstsRes.status === 'rejected') throw pstsRes.reason;
           setPosters(pstsRes.value);
+          setLoadedSections((prev) => ({ ...prev, posters: true }));
+          setPageErrors((prev) => ({ ...prev, posters: null }));
+          if (empErrMsg) {
+            notify('error', empErrMsg);
+          }
+
+          await Promise.allSettled([syncSummary(), syncCalendar()]);
         } else if (section === 'reels') {
           const [rlsRes, empsRes] = await Promise.allSettled([
-            reelService.list(),
-            loadedSections.employees ? Promise.resolve(null) : employeeService.list(),
+            reelService.list(controller.signal),
+            employeeService.list(controller.signal, { retry: false }),
           ]);
-          if (empsRes.status === 'fulfilled' && empsRes.value) {
+          if (isRetryStale()) return;
+
+          let empErrMsg: string | null = null;
+          if (empsRes.status === 'fulfilled') {
             setEmployees(empsRes.value);
             setLoadedSections((prev) => ({ ...prev, employees: true }));
+            setPageErrors((prev) => ({ ...prev, employees: null }));
+          } else if (!isAbortOrUnauthorized(empsRes.reason)) {
+            empErrMsg =
+              empsRes.reason?.message || 'Unable to load employees.';
+            setPageErrors((prev) => ({ ...prev, employees: empErrMsg }));
           }
+
           if (rlsRes.status === 'rejected') throw rlsRes.reason;
           setReels(rlsRes.value);
+          setLoadedSections((prev) => ({ ...prev, reels: true }));
+          setPageErrors((prev) => ({ ...prev, reels: null }));
+          if (empErrMsg) {
+            notify('error', empErrMsg);
+          }
+
+          await Promise.allSettled([syncSummary(), syncCalendar()]);
         } else if (section === 'calendar') {
-          const cal = await dashboardService.getCalendarEvents();
+          const cal = await dashboardService.getCalendarEvents(controller.signal);
+          if (isRetryStale()) return;
           setCalendarEvents(cal);
+          setLoadedSections((prev) => ({ ...prev, calendar: true }));
+          setPageErrors((prev) => ({ ...prev, calendar: null }));
+          await syncSummary();
         }
-        setLoadedSections((prev) => ({ ...prev, [section]: true }));
-        setPageErrors((prev) => ({ ...prev, [section]: null }));
       } catch (err: any) {
-        if (err instanceof ApiError && err.status === 401) return;
+        if (isRetryStale() || isAbortOrUnauthorized(err)) return;
         const msg = err?.message || `Unable to load ${section}.`;
         setPageErrors((prev) => ({ ...prev, [section]: msg }));
         notify('error', msg);
       } finally {
-        setRetryingSection((curr) => (curr === section ? null : curr));
+        if (retryAbortRefs.current[section] === controller) {
+          retryAbortRefs.current[section] = null;
+        }
+        if (reqId === retryRequestIdsRef.current[section]) {
+          retryingInFlightRef.current[section] = false;
+          setRetryingSections((prev) =>
+            prev[section] ? { ...prev, [section]: false } : prev
+          );
+        }
       }
     },
-    [authenticated, loadedSections.employees, notify, retryingSection]
+    [notify]
   );
 
   useEffect(() => {
     if (authenticated) {
       refreshAllData(true);
     } else {
+      refreshRequestIdRef.current += 1;
+      workspaceEpochRef.current += 1;
       refreshAbortRef.current?.abort();
+      refreshAbortRef.current = null;
       inFlightRefreshRef.current = null;
+      abortAllSectionRetries();
+      setDataLoading(false);
+      setRefreshingSections(INITIAL_SECTION_FLAGS);
+      setToast(null);
       setDashboard(null);
       setEmployees([]);
       setTasks([]);
       setPosters([]);
       setReels([]);
       setCalendarEvents([]);
-      setLoadedSections({
-        dashboard: false,
-        employees: false,
-        tasks: false,
-        posters: false,
-        reels: false,
-        calendar: false,
-      });
-      setPageErrors({
-        dashboard: null,
-        employees: null,
-        tasks: null,
-        posters: null,
-        reels: null,
-        calendar: null,
-      });
+      setLoadedSections(INITIAL_SECTION_FLAGS);
+      setPageErrors(INITIAL_SECTION_ERRORS);
     }
     return () => {
+      refreshRequestIdRef.current += 1;
+      workspaceEpochRef.current += 1;
       refreshAbortRef.current?.abort();
+      refreshAbortRef.current = null;
+      inFlightRefreshRef.current = null;
+      abortAllSectionRetries();
     };
-  }, [authenticated, refreshAllData]);
+  }, [authenticated, refreshAllData, abortAllSectionRetries]);
+
+  const handleSignOut = useCallback(async () => {
+    authenticatedRef.current = false;
+    refreshRequestIdRef.current += 1;
+    workspaceEpochRef.current += 1;
+    refreshAbortRef.current?.abort();
+    refreshAbortRef.current = null;
+    inFlightRefreshRef.current = null;
+    abortAllSectionRetries();
+    setDataLoading(false);
+    setRefreshingSections(INITIAL_SECTION_FLAGS);
+    setToast(null);
+    await signOut();
+  }, [abortAllSectionRetries, signOut]);
 
   const handleUploadLogo = async (file: File) => {
     try {
       const updated = await storageServiceUploadLogo(file);
+      if (!authenticatedRef.current) return;
       setSettings(updated);
       notify('success', 'Company logo saved permanently.');
       await refreshAllData(true);
     } catch (err: any) {
+      if (!authenticatedRef.current || isAbortOrUnauthorized(err)) return;
       notify('error', err.message || 'Unable to upload company logo.');
     }
   };
@@ -631,7 +938,7 @@ export default function App() {
           reels: reels.length,
         }}
         sessionLabel={sessionLabel}
-        onSignOut={signOut}
+        onSignOut={handleSignOut}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
       />
@@ -686,7 +993,7 @@ export default function App() {
           {activeSection === 'dashboard' && (
             <DashboardPage
               summary={dashboard}
-              loading={dataLoading || retryingSection === 'dashboard'}
+              loading={refreshingSections.dashboard || retryingSections.dashboard}
               loaded={loadedSections.dashboard}
               error={pageErrors.dashboard}
               settings={settings}
@@ -698,7 +1005,7 @@ export default function App() {
           {activeSection === 'employees' && (
             <EmployeesPage
               employees={employees}
-              loading={dataLoading || retryingSection === 'employees'}
+              loading={refreshingSections.employees || retryingSections.employees}
               loaded={loadedSections.employees}
               error={pageErrors.employees}
               onRetry={() => retrySection('employees')}
@@ -713,7 +1020,7 @@ export default function App() {
             <TasksPage
               tasks={tasks}
               employees={employees}
-              loading={dataLoading || retryingSection === 'tasks'}
+              loading={refreshingSections.tasks || retryingSections.tasks}
               loaded={loadedSections.tasks}
               error={pageErrors.tasks}
               onRetry={() => retrySection('tasks')}
@@ -730,7 +1037,7 @@ export default function App() {
             <PostersPage
               posters={posters}
               employees={employees}
-              loading={dataLoading || retryingSection === 'posters'}
+              loading={refreshingSections.posters || retryingSections.posters}
               loaded={loadedSections.posters}
               error={pageErrors.posters}
               onRetry={() => retrySection('posters')}
@@ -746,7 +1053,7 @@ export default function App() {
             <ReelsPage
               reels={reels}
               employees={employees}
-              loading={dataLoading || retryingSection === 'reels'}
+              loading={refreshingSections.reels || retryingSections.reels}
               loaded={loadedSections.reels}
               error={pageErrors.reels}
               onRetry={() => retrySection('reels')}
@@ -761,7 +1068,7 @@ export default function App() {
           {activeSection === 'calendar' && (
             <CalendarPage
               events={calendarEvents}
-              loading={dataLoading || retryingSection === 'calendar'}
+              loading={refreshingSections.calendar || retryingSections.calendar}
               loaded={loadedSections.calendar}
               error={pageErrors.calendar}
               onRetry={() => retrySection('calendar')}

@@ -14,10 +14,12 @@ export interface EmployeeInput {
 }
 
 export const employeeService = {
-  list: (signal?: AbortSignal) => apiRequest<Employee[]>('/api/employees', { signal }),
-  getDetail: (id: string) =>
+  list: (signal?: AbortSignal, options?: { retry?: boolean }) =>
+    apiRequest<Employee[]>('/api/employees', { signal, retry: options?.retry }),
+  getDetail: (id: string, signal?: AbortSignal) =>
     apiRequest<EmployeeDetail>(
-      `/api/employees/${id}?today=${encodeURIComponent(getLocalTodayISO())}`
+      `/api/employees/${id}?today=${encodeURIComponent(getLocalTodayISO())}`,
+      { signal }
     ),
   create: (input: EmployeeInput) =>
     apiRequest<Employee>('/api/employees', {

@@ -289,7 +289,7 @@ export function CalendarPage({
       )}
 
       {/* Calendar Grid */}
-      {loading && !loaded && events.length === 0 ? (
+      {loading && !loaded && !error && events.length === 0 ? (
         <div className="h-[520px] animate-pulse rounded-2xl bg-slate-200" />
       ) : error && !loaded && events.length === 0 ? (
         <PageLoadError

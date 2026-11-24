@@ -489,7 +489,7 @@ export function ReelsPage({
         </div>
       </div>
 
-      {error && loaded && (
+      {error && loaded && reels.length > 0 && (
         <PageLoadError
           title="Could not refresh reels"
           message={error}
@@ -500,13 +500,13 @@ export function ReelsPage({
       )}
 
       {/* Reels Grid */}
-      {loading && !loaded && reels.length === 0 ? (
+      {loading && !loaded && !error && reels.length === 0 ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="h-72 animate-pulse rounded-2xl bg-slate-200" />
           ))}
         </div>
-      ) : error && !loaded && reels.length === 0 ? (
+      ) : error && reels.length === 0 ? (
         <PageLoadError
           title="Unable to load reels"
           message={error}

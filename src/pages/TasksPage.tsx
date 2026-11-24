@@ -24,6 +24,7 @@ import {
   TaskRecord,
   TaskStatus,
 } from '../types';
+import { ApiError } from '../services/apiClient';
 import { taskService, TaskInput } from '../services/taskService';
 import {
   downloadStoredAttachment,
@@ -145,6 +146,19 @@ export function TasksPage({
   const [uploadingWork, setUploadingWork] = useState(false);
   const [postingUpdate, setPostingUpdate] = useState(false);
   const workInputRef = useRef<HTMLInputElement>(null);
+  const detailReqIdRef = useRef(0);
+  const detailAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      detailReqIdRef.current += 1;
+      detailAbortRef.current?.abort();
+      detailAbortRef.current = null;
+    };
+  }, []);
 
   // Quick Status Modal
   const [statusModalTask, setStatusModalTask] = useState<TaskRecord | null>(null);
@@ -218,17 +232,39 @@ export function TasksPage({
   ]);
 
   const openTaskDetail = async (taskId: string) => {
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
+    const reqId = ++detailReqIdRef.current;
+
     setDetailLoading(true);
     setCommentText('');
     setCommentStatus('');
     setCommentAttachments([]);
     try {
-      const full = await taskService.getDetail(taskId);
+      const full = await taskService.getDetail(taskId, controller.signal);
+      if (!mountedRef.current || controller.signal.aborted || reqId !== detailReqIdRef.current) {
+        return;
+      }
       setDetailTask(full);
     } catch (err: any) {
+      if (
+        !mountedRef.current ||
+        controller.signal.aborted ||
+        reqId !== detailReqIdRef.current ||
+        err?.name === 'AbortError' ||
+        (err instanceof ApiError && err.status === 401)
+      ) {
+        return;
+      }
       onNotify('error', err.message || 'Unable to load task details.');
     } finally {
-      setDetailLoading(false);
+      if (detailAbortRef.current === controller) {
+        detailAbortRef.current = null;
+      }
+      if (mountedRef.current && reqId === detailReqIdRef.current) {
+        setDetailLoading(false);
+      }
     }
   };
 
@@ -550,7 +586,7 @@ export function TasksPage({
         </select>
       </div>
 
-      {error && loaded && (
+      {error && loaded && tasks.length > 0 && (
         <PageLoadError
           title="Could not refresh tasks"
           message={error}
@@ -561,13 +597,13 @@ export function TasksPage({
       )}
 
       {/* Tasks List */}
-      {loading && !loaded && tasks.length === 0 ? (
+      {loading && !loaded && !error && tasks.length === 0 ? (
         <div className="space-y-3">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-24 animate-pulse rounded-2xl bg-slate-200" />
           ))}
         </div>
-      ) : error && !loaded && tasks.length === 0 ? (
+      ) : error && tasks.length === 0 ? (
         <PageLoadError
           title="Unable to load tasks"
           message={error}

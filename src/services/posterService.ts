@@ -21,7 +21,8 @@ export interface PosterInput {
 }
 
 export const posterService = {
-  list: (signal?: AbortSignal) => apiRequest<PosterRecord[]>('/api/posters', { signal }),
+  list: (signal?: AbortSignal, options?: { retry?: boolean }) =>
+    apiRequest<PosterRecord[]>('/api/posters', { signal, retry: options?.retry }),
   create: (input: PosterInput) =>
     apiRequest<PosterRecord>('/api/posters', {
       method: 'POST',

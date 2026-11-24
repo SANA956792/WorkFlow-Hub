@@ -25,8 +25,10 @@ export interface TaskUpdateInput {
 }
 
 export const taskService = {
-  list: (signal?: AbortSignal) => apiRequest<TaskRecord[]>('/api/tasks', { signal }),
-  getDetail: (id: string) => apiRequest<TaskRecord>(`/api/tasks/${id}`),
+  list: (signal?: AbortSignal, options?: { retry?: boolean }) =>
+    apiRequest<TaskRecord[]>('/api/tasks', { signal, retry: options?.retry }),
+  getDetail: (id: string, signal?: AbortSignal) =>
+    apiRequest<TaskRecord>(`/api/tasks/${id}`, { signal }),
   create: (input: TaskInput) =>
     apiRequest<TaskRecord>('/api/tasks', {
       method: 'POST',

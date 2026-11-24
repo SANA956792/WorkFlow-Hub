@@ -1,3 +1,7 @@
+export interface ApiRequestOptions extends RequestInit {
+  retry?: boolean;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -73,11 +77,12 @@ function sleepWithSignal(ms: number, signal?: AbortSignal | null): Promise<void>
 
 async function fetchWithSafeGetRetry(
   path: string,
-  options: RequestInit
+  options: ApiRequestOptions
 ): Promise<Response> {
   const method = (options.method || 'GET').toUpperCase();
   const isSafeRead = method === 'GET' || method === 'HEAD';
-  const maxAttempts = isSafeRead ? 1 + MAX_GET_RETRIES : 1;
+  const allowRetry = options.retry !== false;
+  const maxAttempts = isSafeRead && allowRetry ? 1 + MAX_GET_RETRIES : 1;
 
   const headers = new Headers(options.headers || {});
   headers.set('X-Requested-With', 'XMLHttpRequest');
@@ -142,7 +147,7 @@ async function fetchWithSafeGetRetry(
 
 export async function apiRequest<T>(
   path: string,
-  options: RequestInit = {}
+  options: ApiRequestOptions = {}
 ): Promise<T> {
   const response = await fetchWithSafeGetRetry(path, options);
 
@@ -164,7 +169,7 @@ export async function apiRequest<T>(
 
 export async function publicRequest<T>(
   path: string,
-  options: RequestInit = {}
+  options: ApiRequestOptions = {}
 ): Promise<T> {
   const response = await fetchWithSafeGetRetry(path, options);
 
