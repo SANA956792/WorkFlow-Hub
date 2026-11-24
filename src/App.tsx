@@ -39,6 +39,10 @@ import { PostersPage } from './pages/PostersPage';
 import { ReelsPage } from './pages/ReelsPage';
 import { CalendarPage } from './pages/CalendarPage';
 
+const OFFICIAL_LOGO_URL = '/assets/aistudio/IMG_8565.JPG_978ea5bd.jpeg';
+const LEGACY_DEFAULT_LOGO_URL =
+  '/assets/aistudio/c1a1b7c939908f430c32f54944ae2d9b_58b868bd.jpg';
+
 const ALL_SECTIONS: NavSection[] = [
   'dashboard',
   'employees',
@@ -206,17 +210,25 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const effectiveLogoUrl =
+    settings?.logoUrl && settings.logoUrl !== LEGACY_DEFAULT_LOGO_URL
+      ? settings.logoUrl
+      : OFFICIAL_LOGO_URL;
+
+  const effectiveSettings = settings
+    ? { ...settings, logoUrl: effectiveLogoUrl }
+    : null;
+
   // Sync dynamic favicon with stored company logo
   useEffect(() => {
-    if (!settings?.logoUrl) return;
     let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
     if (!link) {
       link = document.createElement('link');
       link.rel = 'icon';
       document.head.appendChild(link);
     }
-    link.href = settings.logoUrl;
-  }, [settings?.logoUrl]);
+    link.href = effectiveLogoUrl;
+  }, [effectiveLogoUrl]);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -806,10 +818,7 @@ export default function App() {
           <div className="flex flex-col items-center text-center">
             <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-white p-2">
               <img
-                src={
-                  settings?.logoUrl ||
-                  '/assets/aistudio/c1a1b7c939908f430c32f54944ae2d9b_58b868bd.jpg'
-                }
+                src={effectiveLogoUrl}
                 alt="Company Logo"
                 referrerPolicy="no-referrer"
                 className="h-full w-full object-contain"
@@ -929,7 +938,7 @@ export default function App() {
       <Sidebar
         activeSection={activeSection}
         onSelectSection={(sec) => handleNavigate(sec)}
-        settings={settings}
+        settings={effectiveSettings}
         onUploadLogo={handleUploadLogo}
         counts={{
           employees: employees.length,
@@ -957,10 +966,7 @@ export default function App() {
             </button>
             <div className="flex items-center gap-2.5 lg:hidden">
               <img
-                src={
-                  settings?.logoUrl ||
-                  '/assets/aistudio/c1a1b7c939908f430c32f54944ae2d9b_58b868bd.jpg'
-                }
+                src={effectiveLogoUrl}
                 alt="Company Logo"
                 referrerPolicy="no-referrer"
                 className="h-7 w-7 rounded-md object-contain"
@@ -996,7 +1002,7 @@ export default function App() {
               loading={refreshingSections.dashboard || retryingSections.dashboard}
               loaded={loadedSections.dashboard}
               error={pageErrors.dashboard}
-              settings={settings}
+              settings={effectiveSettings}
               onRetry={() => retrySection('dashboard')}
               onNavigate={handleNavigate}
             />
