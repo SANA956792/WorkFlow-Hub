@@ -1,5 +1,8 @@
 import crypto from 'crypto';
-import webpush from 'web-push';
+import {
+  sendNotification,
+  type PushSubscription as WebPushSubscription,
+} from 'web-push';
 import { createPool } from '../db/index.ts';
 
 export interface ValidatedPushSubscription {
@@ -377,7 +380,7 @@ export async function deletePushSubscriptionByEndpoint(endpoint: string): Promis
   }
 }
 
-async function listActivePushSubscriptions(): Promise<webpush.PushSubscription[]> {
+async function listActivePushSubscriptions(): Promise<WebPushSubscription[]> {
   const pool = createPool();
   const cols = await getPushSubscriptionsColumns();
 
@@ -395,7 +398,7 @@ async function listActivePushSubscriptions(): Promise<webpush.PushSubscription[]
   const result = await pool.query(`SELECT ${selectList} FROM "push_subscriptions"${whereSql}`);
 
   const seenEndpoints = new Set<string>();
-  const subs: webpush.PushSubscription[] = [];
+  const subs: WebPushSubscription[] = [];
 
   for (const row of result.rows) {
     const parsedSub = parseKeysJson(row.subscription) as {
@@ -451,7 +454,7 @@ export async function sendPushNotificationToAll(
     return { sent: 0, removed: 0 };
   }
 
-  let subscriptions: webpush.PushSubscription[];
+  let subscriptions: WebPushSubscription[];
   try {
     subscriptions = await listActivePushSubscriptions();
   } catch (err: any) {
@@ -478,7 +481,7 @@ export async function sendPushNotificationToAll(
   await Promise.allSettled(
     subscriptions.map(async (sub) => {
       try {
-        await webpush.sendNotification(sub, serializedPayload, {
+        await sendNotification(sub, serializedPayload, {
           vapidDetails: vapid,
           TTL: 86400,
           timeout: 5000,
