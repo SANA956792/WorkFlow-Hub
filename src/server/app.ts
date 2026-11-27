@@ -52,6 +52,16 @@ import {
   verifyFileAccessToken,
   verifySameOriginMutation,
 } from '../middleware/auth.ts';
+import {
+  deletePushSubscriptionByEndpoint,
+  getVapidPublicKey,
+  isPushConfigured,
+  notifyTaskCreated,
+  notifyTaskProgressUpdate,
+  notifyTaskUpdated,
+  savePushSubscription,
+  validatePushSubscriptionInput,
+} from './push.ts';
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -388,6 +398,69 @@ export function createApp() {
       res.json(updated);
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to update settings.' });
+    }
+  });
+
+  // ============================================================================
+  // WEB PUSH NOTIFICATIONS (VAPID + push_subscriptions)
+  // ============================================================================
+
+  app.get('/api/push/status', requireAuth, (_req: AuthRequest, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.json({
+      configured: isPushConfigured(),
+      publicKey: getVapidPublicKey(),
+    });
+  });
+
+  app.post('/api/push/subscribe', requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const validation = validatePushSubscriptionInput(req.body);
+      if (validation.error || !validation.subscription) {
+        return res
+          .status(400)
+          .json({ error: validation.error || 'Invalid push subscription.' });
+      }
+
+      const userAgent =
+        typeof req.headers['user-agent'] === 'string'
+          ? req.headers['user-agent']
+          : null;
+
+      await savePushSubscription({
+        subscription: validation.subscription,
+        userAgent,
+        sessionId: req.sessionId ?? null,
+      });
+
+      res.status(201).json({ ok: true });
+    } catch (error: any) {
+      console.error('Failed to save push subscription:', error?.message || 'PUSH_SAVE_ERR');
+      res.status(500).json({ error: 'Unable to save push notification subscription.' });
+    }
+  });
+
+  app.delete('/api/push/subscribe', requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const endpoint =
+        typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : '';
+      if (!endpoint || endpoint.length > 2048) {
+        return res.status(400).json({ error: 'Invalid push subscription endpoint.' });
+      }
+      try {
+        const parsed = new URL(endpoint);
+        if (parsed.protocol !== 'https:') {
+          return res.status(400).json({ error: 'Invalid push subscription endpoint.' });
+        }
+      } catch {
+        return res.status(400).json({ error: 'Invalid push subscription endpoint.' });
+      }
+
+      await deletePushSubscriptionByEndpoint(endpoint);
+      res.json({ ok: true });
+    } catch (error: any) {
+      console.error('Failed to remove push subscription:', error?.message || 'PUSH_DELETE_ERR');
+      res.status(500).json({ error: 'Unable to remove push notification subscription.' });
     }
   });
 
@@ -852,6 +925,11 @@ export function createApp() {
         req.actorName || 'Company Member',
         req.actorUid
       );
+      if (created) {
+        await notifyTaskCreated(created).catch((err) => {
+          console.warn('Non-fatal push notification error on createTask:', err?.message);
+        });
+      }
       res.status(201).json(created);
     } catch (error: any) {
       const status = error.message?.includes('already exists') ? 409 : 500;
@@ -864,6 +942,7 @@ export function createApp() {
       if (!UUID_RE.test(req.params.id)) {
         return res.status(400).json({ error: 'Invalid task ID.' });
       }
+      const before = await getTaskDetail(req.params.id).catch(() => null);
       const updated = await updateTask(
         req.params.id,
         req.body ?? {},
@@ -873,6 +952,9 @@ export function createApp() {
       if (!updated) {
         return res.status(404).json({ error: 'Task not found.' });
       }
+      await notifyTaskUpdated(before, updated).catch((err) => {
+        console.warn('Non-fatal push notification error on updateTask:', err?.message);
+      });
       res.json(updated);
     } catch (error: any) {
       const status = error.message?.includes('already exists') ? 409 : 500;
@@ -899,6 +981,13 @@ export function createApp() {
       if (!updated) {
         return res.status(404).json({ error: 'Task not found.' });
       }
+      await notifyTaskProgressUpdate(
+        updated,
+        comment,
+        typeof statusChangeTo === 'string' ? statusChangeTo : null
+      ).catch((err) => {
+        console.warn('Non-fatal push notification error on addTaskUpdate:', err?.message);
+      });
       res.status(201).json(updated);
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to post task update.' });

@@ -32,6 +32,7 @@ import { taskService } from './services/taskService';
 import { posterService } from './services/posterService';
 import { reelService } from './services/reelService';
 import { Sidebar } from './components/Sidebar';
+import { PushNotificationButton } from './components/PushNotificationButton';
 import { DashboardPage } from './pages/DashboardPage';
 import { EmployeesPage } from './pages/EmployeesPage';
 import { TasksPage } from './pages/TasksPage';
@@ -42,6 +43,14 @@ import { CalendarPage } from './pages/CalendarPage';
 const OFFICIAL_LOGO_URL = '/assets/aistudio/IMG_8565.JPG_978ea5bd.jpeg';
 const LEGACY_DEFAULT_LOGO_URL =
   '/assets/aistudio/c1a1b7c939908f430c32f54944ae2d9b_58b868bd.jpg';
+const VALID_NAV_SECTIONS = new Set<NavSection>([
+  'dashboard',
+  'employees',
+  'tasks',
+  'posters',
+  'reels',
+  'calendar',
+]);
 
 const ALL_SECTIONS: NavSection[] = [
   'dashboard',
@@ -242,6 +251,26 @@ export default function App() {
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
+
+  const pendingPushTargetRef = useRef<{
+    section: NavSection;
+    taskId?: string;
+  } | null>(null);
+
+  // Read initial deep-link query params when opened from a push notification
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const secParam = params.get('section') as NavSection | null;
+    const taskIdParam = params.get('taskId') || undefined;
+    if (secParam && VALID_NAV_SECTIONS.has(secParam)) {
+      pendingPushTargetRef.current = { section: secParam, taskId: taskIdParam };
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (taskIdParam) {
+      pendingPushTargetRef.current = { section: 'tasks', taskId: taskIdParam };
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
 
   const abortAllSectionRetries = useCallback(() => {
     for (const sec of ALL_SECTIONS) {
@@ -734,29 +763,72 @@ export default function App() {
     }
   };
 
-  const handleNavigate = (
-    section: NavSection,
-    opts?: {
-      taskStatus?: TaskStatus | 'All';
-      taskDeadlineFilter?: 'all' | 'today' | 'upcoming' | 'overdue';
-      posterStatus?: PosterStatus | 'All';
-      reelStatus?: ReelStatus | 'All';
-      employeeId?: string;
-      taskId?: string;
-      posterId?: string;
-      reelId?: string;
+  const handleNavigate = useCallback(
+    (
+      section: NavSection,
+      opts?: {
+        taskStatus?: TaskStatus | 'All';
+        taskDeadlineFilter?: 'all' | 'today' | 'upcoming' | 'overdue';
+        posterStatus?: PosterStatus | 'All';
+        reelStatus?: ReelStatus | 'All';
+        employeeId?: string;
+        taskId?: string;
+        posterId?: string;
+        reelId?: string;
+      }
+    ) => {
+      setTaskStatusFilter(opts?.taskStatus);
+      setTaskDeadlineFilter(opts?.taskDeadlineFilter);
+      setPosterStatusFilter(opts?.posterStatus);
+      setReelStatusFilter(opts?.reelStatus);
+      setSelectedEmployeeId(opts?.employeeId || null);
+      setSelectedTaskId(opts?.taskId || null);
+      setSelectedPosterId(opts?.posterId || null);
+      setSelectedReelId(opts?.reelId || null);
+      setActiveSection(section);
+    },
+    []
+  );
+
+  // Apply pending push notification navigation once authenticated, and listen for live SW clicks
+  useEffect(() => {
+    if (authenticated && pendingPushTargetRef.current) {
+      const target = pendingPushTargetRef.current;
+      pendingPushTargetRef.current = null;
+      setMobileSidebarOpen(false);
+      handleNavigate(target.section, { taskId: target.taskId });
     }
-  ) => {
-    setTaskStatusFilter(opts?.taskStatus);
-    setTaskDeadlineFilter(opts?.taskDeadlineFilter);
-    setPosterStatusFilter(opts?.posterStatus);
-    setReelStatusFilter(opts?.reelStatus);
-    setSelectedEmployeeId(opts?.employeeId || null);
-    setSelectedTaskId(opts?.taskId || null);
-    setSelectedPosterId(opts?.posterId || null);
-    setSelectedReelId(opts?.reelId || null);
-    setActiveSection(section);
-  };
+  }, [authenticated, handleNavigate]);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      return;
+    }
+    const onSwMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || data.type !== 'WORKFLOW_PUSH_NAVIGATE') return;
+      const rawSection = data.section as NavSection;
+      const targetSection: NavSection = VALID_NAV_SECTIONS.has(rawSection)
+        ? rawSection
+        : 'tasks';
+      const targetTaskId =
+        typeof data.taskId === 'string' && data.taskId.trim()
+          ? data.taskId.trim()
+          : undefined;
+
+      if (authenticatedRef.current) {
+        setMobileSidebarOpen(false);
+        handleNavigate(targetSection, { taskId: targetTaskId });
+      } else {
+        pendingPushTargetRef.current = {
+          section: targetSection,
+          taskId: targetTaskId,
+        };
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onSwMessage);
+  }, [handleNavigate]);
 
   const handleAccessSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -981,17 +1053,20 @@ export default function App() {
             </span>
           </div>
 
-          <button
-            type="button"
-            onClick={() => refreshAllData(false)}
-            disabled={dataLoading}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
-          >
-            <RefreshCw
-              className={`h-3.5 w-3.5 ${dataLoading ? 'animate-spin' : ''}`}
-            />
-            <span>Refresh</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <PushNotificationButton onNotify={notify} />
+            <button
+              type="button"
+              onClick={() => refreshAllData(false)}
+              disabled={dataLoading}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${dataLoading ? 'animate-spin' : ''}`}
+              />
+              <span>Refresh</span>
+            </button>
+          </div>
         </header>
 
         {/* Main Viewport */}
